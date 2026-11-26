@@ -30,8 +30,15 @@ Atualizar depois: `cd /opt/venue-lock && git pull && ./install.sh lock.venuemark
    pela senha de administrador do portal (mínimo 8 caracteres). Servidor, usuário e
    polaridade do relé já vêm preenchidos. Sem essas duas trocas o Arduino IDE não compila. **Nunca envie o `.ino` com o secret para o GitHub.**
 5. Grave com o adaptador USB do ESP-01 (modo PROG).
-6. Ligue no módulo: ele abre o Wi-Fi `VENUE_Lock-xxxxxx`. Abrir a configuração exige a
-   **senha de administrador**; depois só aparecem **Wi-Fi**, **senha** e **nome do ponto**. O ESP aparece sozinho no app.
+6. Ligue no módulo: ele abre o Wi-Fi aberto `VENUE_Lock-xxxxxx` (também abre segurando o botão 4 s).
+   - **Sem senha:** escolha a rede na lista, digite a senha do Wi-Fi e toque em Conectar. O ESP
+     testa antes de salvar e avisa "senha incorreta" ou "rede não encontrada". Na primeira
+     instalação, informe o nome do ponto (o mesmo do sistema).
+   - **Configurações avançadas (senha de administrador):** nome do ponto, polaridade do relé com
+     botão de teste, tempo de liberação, política de queda, saída livre, PIN, reinício e reset.
+     Esses ajustes sobem para o servidor quando o ESP reconectar.
+   - Durante o portal a porta fica livre (igual ao firmware antigo): o botão deve ficar do lado
+     de dentro.
 
 O secret fica gravado no firmware: não use "Gerar novo secret" no app sem necessidade,
 porque todos os ESPs precisariam ser regravados por USB. O `.bin` publicado para atualização

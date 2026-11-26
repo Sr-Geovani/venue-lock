@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -465,8 +465,8 @@ async def h_device_patch(request: web.Request) -> web.Response:
         f["policy"] = b["policy"]
     if "grace_s" in b:
         g = int(b["grace_s"])
-        if not 10 <= g <= 86400:
-            raise ValueError("grace_s: 10 a 86400")
+        if not 10 <= g <= 65535:
+            raise ValueError("grace_s: 10 a 65535")
         f["grace_s"] = g
     if "release_ms" in b:
         r = int(b["release_ms"])
@@ -736,6 +736,27 @@ async def handle_esp_msg(app: web.Application, c: DevConn, m: dict) -> None:
         st.update_device(c.did, last_seen=time.time(), rssi=int(m.get("rssi", 0)))
 
 
+def apply_local_cfg(st: Store, did: int, lcfg: dict) -> dict:
+    """Ajustes feitos no portal do ESP (Configurações avançadas) sobem para o servidor."""
+    f: dict[str, Any] = {}
+    try:
+        if lcfg.get("policy") in POLICIES:
+            f["policy"] = lcfg["policy"]
+        if "grace" in lcfg and 10 <= int(lcfg["grace"]) <= 65535:
+            f["grace_s"] = int(lcfg["grace"])
+        if "rel" in lcfg and 1000 <= int(lcfg["rel"]) <= 60000:
+            f["release_ms"] = int(lcfg["rel"])
+        if "egress" in lcfg:
+            f["egress_ok"] = 1 if lcfg["egress"] else 0
+    except (TypeError, ValueError):
+        return {}
+    if f.get("policy") == "hold" and not f.get("egress_ok"):
+        f["policy"] = "release"  # nunca aceita manter trancado sem saída livre
+    if f:
+        st.update_device(did, **f)
+    return f
+
+
 async def ws_esp(request: web.Request) -> web.WebSocketResponse:
     app = request.app
     st, hub = app[STORE], app[HUB]
@@ -780,6 +801,12 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
                      host=str(hello.get("host", ""))[:40], rssi=int(hello.get("rssi", 0)),
                      boot=str(hello.get("boot", ""))[:40], armed=1 if hello.get("armed") else 0,
                      last_seen=time.time())
+    lcfg = hello.get("lcfg")
+    if isinstance(lcfg, dict):
+        applied = apply_local_cfg(st, did, lcfg)
+        if applied:
+            st.event(did, "config", "esp:portal", json.dumps(applied, ensure_ascii=False))
+            LOG.info("esp %s/%s: ajustes do portal local aplicados %s", user["username"], uuid, applied)
     st.close_outage(did)
     st.event(did, "online", "esp", f"ip {ip} fw {hello.get('fw', '?')} boot={hello.get('boot', '')}")
     if d["ota_ver"] and d["ota_ver"] == hello.get("fw") and d["fw"] != hello.get("fw"):
@@ -966,7 +993,7 @@ function settings(d){const ver=`${location.origin}/external/api/get?token=${d.ap
   el("label",{},"Nome"),el("input",{name:"name",value:d.name,maxlength:32}),
   el("label",{},"Tempo de liberação (ms)"),el("input",{name:"release_ms",type:"number",min:1000,max:60000,value:d.release_ms}),
   el("label",{},"Na queda de internet"),el("select",{name:"policy"},el("option",{value:"release",selected:d.policy==="release"},"Liberar a porta após o tempo abaixo"),el("option",{value:"hold",selected:d.policy==="hold"},"Manter trancado (comando local continua)")),
-  el("label",{},"Tempo sem servidor antes de aplicar (s)"),el("input",{name:"grace_s",type:"number",min:10,max:86400,value:d.grace_s}),
+  el("label",{},"Tempo sem servidor antes de aplicar (s)"),el("input",{name:"grace_s",type:"number",min:10,max:65535,value:d.grace_s}),
   el("label",{class:"row"},el("input",{name:"egress_ok",type:"checkbox",checked:!!d.egress_ok,style:"width:auto"}),"Botão de saída e emergência instalados direto na alimentação da fechadura"),
   el("label",{},"PIN local (8-16, também é a senha do Wi-Fi de emergência do ESP)"),el("input",{name:"pin",value:d.pin,autocomplete:"off"}),
   el("div",{class:"cell",style:"margin-top:14px"},el("strong",{},"Integração com o sistema"),el("div",{class:"mut"},"Cole no ponto do sistema, tipo de loja Blink"),

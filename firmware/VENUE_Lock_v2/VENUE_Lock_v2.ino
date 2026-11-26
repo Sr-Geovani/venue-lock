@@ -26,7 +26,7 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 
-#define FW_VERSION      "2.3.2"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.0"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -37,7 +37,7 @@
 #define VL_ACCOUNT_USER   "venue"
 #define VL_ACCOUNT_SECRET "COLE_O_SECRET_AQUI"
 #define VL_ADMIN_PASSWORD "TROQUE_ESTA_SENHA"   // senha para abrir a configuração no ESP (mín. 8)
-#define RELAY_ACTIVE_HIGH 1          // ESP-01S Relay padrão: 1. Só mude se o relé funcionar invertido.
+#define RELAY_ACTIVE_HIGH 1          // padrão de fábrica; ajustável no portal (Configurações avançadas)
 static_assert(sizeof(VL_ACCOUNT_SECRET) - 1 >= 20,
               "Cole o secret da conta em VL_ACCOUNT_SECRET (app VENUE -> Conta -> Secret do ESP)");
 // =============================================================================
@@ -46,7 +46,7 @@ static_assert(sizeof(VL_ACCOUNT_SECRET) - 1 >= 20,
 #define BUTTON_ENABLED  1
 #define SERIAL_DEBUG    1
 
-static const uint32_t CFG_MAGIC          = 0x564C4B32;  // "VLK2"
+static const uint32_t CFG_MAGIC          = 0x564C4B33;  // "VLK3"
 static const uint32_t WIFI_AP_FALLBACK_MS= 60000;       // roteador fora > 60 s abre AP de emergência
 static const uint32_t AP_IDLE_CLOSE_MS   = 30000;       // AP fecha 30 s após Wi-Fi voltar e sem clientes
 static const uint32_t PORTAL_IDLE_MS     = 300000;      // portal de configuração: 5 min sem uso
@@ -76,6 +76,7 @@ struct Config {
   char user[33], secret[65], uuid[33], name[33], pin[17];
   uint8_t policy, armed, activeHigh, egress;
   uint16_t graceS, releaseMs;
+  uint8_t lcfgDirty;      // ajuste feito no portal local ainda não enviado ao servidor
   uint32_t crc;
 } cfg;
 
@@ -110,7 +111,13 @@ bool apFallback = false;
 uint32_t wifiDownSince = 0, apIdleSince = 0;
 bool mdnsUp = false;
 uint32_t restartAt = 0;
-String scanOptions;
+enum WifiTest : uint8_t { T_IDLE, T_TEST, T_OK, T_FAIL };
+WifiTest tState = T_IDLE;
+String tSsid, tPass, tMsg;
+uint32_t tStart = 0;
+bool firstSetup = false;
+uint32_t relayTestUntil = 0;
+uint8_t relayTestAh = 1;
 char portalSession[33] = "";
 uint32_t portalSessionAt = 0, portalLockUntil = 0;
 uint8_t portalFails = 0;
@@ -201,7 +208,7 @@ void cfgDefaults() {
   strlcpy(cfg.name, cfg.uuid, sizeof(cfg.name));
   cfg.policy = POLICY_RELEASE;
   cfg.armed = 1;
-  cfg.activeHigh = 1;
+  cfg.activeHigh = RELAY_ACTIVE_HIGH;
   cfg.graceS = 60;
   cfg.releaseMs = 5000;
 }
@@ -229,7 +236,7 @@ void cfgLoad() {
   cfg.port = VL_SERVER_PORT;
   strlcpy(cfg.user, VL_ACCOUNT_USER, sizeof(cfg.user));
   strlcpy(cfg.secret, VL_ACCOUNT_SECRET, sizeof(cfg.secret));
-  cfg.activeHigh = RELAY_ACTIVE_HIGH;
+  cfg.activeHigh = cfg.activeHigh ? 1 : 0;
 }
 
 void deriveDeviceKey() {
@@ -326,7 +333,8 @@ void handleSigned(const char* p, const char* s) {
     const char* name = d["name"] | cfg.name; const char* pin = d["pin"] | cfg.pin;
     const char* pol = d["policy"] | "release";
     uint8_t policy = !strcmp(pol, "hold") ? POLICY_HOLD : POLICY_RELEASE;
-    uint16_t grace = d["grace"] | cfg.graceS, rel = d["rel"] | cfg.releaseMs;
+    uint32_t grace32 = d["grace"] | (uint32_t)cfg.graceS;
+    uint16_t grace = grace32 > 65535 ? 65535 : grace32, rel = d["rel"] | cfg.releaseMs;
     uint8_t egress = (d["egress"] | 0) ? 1 : 0;
     if (strcmp(name, cfg.name)) { strlcpy(cfg.name, name, sizeof(cfg.name)); changed = true; }
     if (strcmp(pin, cfg.pin) && strlen(pin) >= 8) { strlcpy(cfg.pin, pin, sizeof(cfg.pin)); changed = true; }
@@ -375,6 +383,11 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
         h["fw"] = FW_VERSION; h["ip"] = WiFi.localIP().toString(); h["host"] = mdnsName();
         h["rssi"] = WiFi.RSSI(); h["armed"] = (bool)cfg.armed; h["relay"] = relayOn; h["free"] = offlineFree;
         h["boot"] = ESP.getResetReason(); h["tag"] = FW_TAG;
+        if (cfg.lcfgDirty) {
+          JsonObject l = h["lcfg"].to<JsonObject>();
+          l["policy"] = cfg.policy == POLICY_HOLD ? "hold" : "release";
+          l["grace"] = cfg.graceS; l["rel"] = cfg.releaseMs; l["egress"] = cfg.egress;
+        }
         String out; serializeJson(h, out); ws.sendTXT(out);
       } else if (!strcmp(t, "ok")) {
         String expect = hmacHex(dkey, 32, String("srv|") + clientNonce + "|" + serverNonce);
@@ -384,6 +397,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
           return;
         }
         wsAuthed = true; lastLinkMs = millis();
+        if (cfg.lcfgDirty) { cfg.lcfgDirty = 0; cfgSave(); }
         LOGF("[ws] autenticado nos dois sentidos");
         flushEvents();
         sendState();
@@ -495,7 +509,81 @@ void handleLocalCmd() {
 }
 
 // ------------------------------------------------------------------ portal de configuração
-// ------------------------------------------------------------------ login do portal
+// Nível 1 (sem senha): escolher Wi-Fi da lista, testar a senha antes de salvar e,
+// na primeira instalação, o nome do ponto.
+// Nível 2 (senha de administrador): polaridade, tempos, política de queda, nome,
+// teste do relé, reinício e reset de fábrica.
+static const char PORTAL_HTML[] PROGMEM = R"HTML(<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>VENUE Lock</title><style>
+body{margin:0;background:#0b0e13;color:#e9edf3;font:16px -apple-system,system-ui,sans-serif;padding:16px}
+h1{color:#4fd1b5;margin:4px 0;font-size:24px}.c{background:#151a22;border-radius:16px;padding:14px;margin:12px 0}
+.m{color:#8b94a5;font-size:14px}.e{color:#f06a6a}.ok{color:#46d483;font-weight:600}.h{display:none}
+button,input,select{font:inherit;width:100%;box-sizing:border-box;border:0;border-radius:12px;padding:13px;margin-top:8px;background:#1e2430;color:#e9edf3}
+button{font-weight:600}.a{background:#1d3a35;color:#4fd1b5}.d{background:#3a1f22;color:#f06a6a}
+.net{display:flex;justify-content:space-between;text-align:left}.row{display:flex;justify-content:space-between;align-items:center}
+.sm{width:auto;padding:8px 12px;margin:0}label{display:block;margin-top:10px;color:#8b94a5;font-size:13px}
+.ck{display:flex;gap:8px;align-items:center}.ck input{width:auto;margin:0}</style></head><body>
+<h1>VENUE Lock</h1><div class="m" id="sub">carregando…</div>
+<div id="vWifi" class="c"><div class="row"><b>Escolha a rede Wi-Fi</b><button class="sm" onclick="scan(1)">Atualizar</button></div>
+<div id="nets" class="m">Procurando redes…</div><button onclick="pick('',1,1)">Rede oculta / digitar nome</button>
+<div class="m" style="margin-top:8px">Só aparecem redes 2,4 GHz (o ESP não usa 5 GHz).</div></div>
+<div id="vPass" class="c h"><b id="pNet"></b><input id="pSsid" class="h" placeholder="Nome da rede" maxlength="32">
+<input id="pPass" type="password" placeholder="Senha do Wi-Fi" maxlength="63" autocomplete="off">
+<label class="ck"><input type="checkbox" onchange="$('pPass').type=this.checked?'text':'password'">mostrar senha</label>
+<button class="a" id="bTest" onclick="test()">Conectar</button><button onclick="show('vWifi')">Voltar</button><div id="tMsg" class="m" style="margin-top:10px"></div></div>
+<div id="vSave" class="c h"><div class="ok" id="okMsg"></div><div id="nameBox"><label>Nome do ponto (o mesmo do sistema: a-z, 0-9, _ ou -)</label>
+<input id="uuid" autocapitalize="none" maxlength="32"></div><button class="a" onclick="save()">Salvar e reiniciar</button></div>
+<div id="vLogin" class="c h"><b>Configurações avançadas</b><label>Senha de administrador</label><input id="lp" type="password" autocomplete="off">
+<button class="a" onclick="login()">Entrar</button><button onclick="show('vWifi')">Voltar</button></div>
+<div id="vAdv" class="c h"><b>Configurações avançadas</b>
+<label>Nome do ponto</label><input id="aUuid" autocapitalize="none" maxlength="32">
+<label>Polaridade do relé</label><select id="aAh"><option value="1">Ativo em nível ALTO (padrão ESP-01S Relay)</option><option value="0">Ativo em nível BAIXO</option></select>
+<button onclick="relayTest()">Testar relé (1,5 s)</button>
+<label>Tempo de liberação (ms)</label><input id="aRel" type="number" min="1000" max="60000">
+<label>Na queda de internet</label><select id="aPol"><option value="release">Liberar a porta após o tempo abaixo</option><option value="hold">Manter trancado (exige saída livre)</option></select>
+<label>Tempo sem servidor antes de aplicar (s)</label><input id="aGrace" type="number" min="10" max="65535">
+<label class="ck"><input id="aEg" type="checkbox">Botão de saída e emergência instalados na alimentação da fechadura</label>
+<div class="m" id="aPin" style="margin-top:10px"></div>
+<button class="a" onclick="saveAdv()">Salvar avançado</button><button onclick="post('/p/exit',{}).then(()=>bye('Reiniciando…'))">Reiniciar ESP</button>
+<button class="d" onclick="factory()">Reset de fábrica</button><button onclick="show('vWifi')">Voltar</button></div>
+<div class="c"><button onclick="adv()">Configurações avançadas</button><button onclick="post('/p/exit',{}).then(()=>bye('Saindo sem alterar. O ESP volta ao normal.'))">Sair sem alterar</button></div>
+<div id="msg" class="m"></div>
+<script>
+const $=i=>document.getElementById(i);let INFO={},NETS=[];
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+async function j(u,o){const r=await fetch(u,o);let d={};try{d=await r.json()}catch(e){}if(!r.ok)throw new Error(d.e||('Erro '+r.status));return d}
+function post(u,d){return j(u,{method:'POST',body:new URLSearchParams(d)})}
+function show(v){['vWifi','vPass','vSave','vLogin','vAdv'].forEach(x=>$(x).classList.toggle('h',x!==v));msg('')}
+function msg(t,bad){$('msg').textContent=t;$('msg').className=bad?'e':'ok'}
+function bye(t){document.body.innerHTML='<h1>VENUE Lock</h1><p>'+t+'</p><p class="m">Pode fechar esta página.</p>'}
+function bars(r){return r>-60?'▂▄▆█':r>-70?'▂▄▆':r>-80?'▂▄':'▂'}
+async function info(){try{INFO=await j('/p/info');$('sub').textContent='fw '+INFO.fw+' · '+INFO.uuid+(INFO.ssid?' · rede atual: '+INFO.ssid:' · primeira instalação');$('uuid').value=INFO.uuid}catch(e){$('sub').textContent='sem resposta do ESP'}}
+async function scan(force){$('nets').textContent='Procurando redes…';for(let i=0;i<25;i++){let d={};try{d=await j('/p/scan'+(force&&!i?'?r=1':''))}catch(e){}
+ if(d.nets){NETS=d.nets;render();return}await wait(800)}$('nets').textContent='Não foi possível listar as redes. Toque em Atualizar.'}
+function render(){const b=$('nets');b.innerHTML='';if(!NETS.length){b.textContent='Nenhuma rede 2,4 GHz encontrada.';return}
+ NETS.forEach(n=>{const e=document.createElement('button');e.className='net';const a=document.createElement('span'),c=document.createElement('span');
+ a.textContent=n.s;c.textContent=(n.e?'🔒 ':'')+bars(n.r);e.append(a,c);e.onclick=()=>pick(n.s,0,n.e);b.append(e)})}
+function pick(s,manual,enc){$('pNet').textContent=manual?'Rede oculta':s;$('pSsid').classList.toggle('h',!manual);$('pSsid').value=s;
+ $('pPass').value='';$('pPass').classList.toggle('h',!enc);$('tMsg').textContent='';$('tMsg').className='m';show('vPass');if(enc&&!manual)$('pPass').focus()}
+async function test(){const s=$('pSsid').value.trim(),p=$('pPass').value;if(!s){$('tMsg').textContent='Informe o nome da rede';return}
+ $('bTest').disabled=true;$('tMsg').className='m';$('tMsg').textContent='Testando a conexão (até 20 s). O celular pode desconectar por alguns segundos: se acontecer, conecte de novo no Wi-Fi VENUE_Lock.';
+ try{await post('/p/wifi',{ssid:s,pass:p});for(let i=0;i<45;i++){await wait(1000);let d;try{d=await j('/p/wifi')}catch(e){continue}
+  if(d.st==='ok'){$('okMsg').textContent='✓ Conectado em '+s+' (sinal '+d.rssi+' dBm)';$('nameBox').classList.toggle('h',!(INFO.first||INFO.admin));show('vSave');return}
+  if(d.st==='fail'){$('tMsg').className='e';$('tMsg').textContent='✗ '+d.msg;return}}
+  $('tMsg').className='e';$('tMsg').textContent='Sem resposta do ESP. Conecte de novo no Wi-Fi VENUE_Lock e tente outra vez.'}
+ catch(e){$('tMsg').className='e';$('tMsg').textContent=e.message}finally{$('bTest').disabled=false}}
+async function save(){try{await post('/p/save',{uuid:$('uuid').value.trim().toLowerCase()});bye('Salvo! O ESP está reiniciando e vai conectar na rede escolhida. Em até 1 minuto ele aparece online no app.')}catch(e){msg(e.message,1)}}
+async function adv(){if(INFO.admin)return loadAdv();show('vLogin');$('lp').focus()}
+async function login(){try{await post('/p/login',{p:$('lp').value});$('lp').value='';INFO.admin=true;await loadAdv()}catch(e){msg(e.message,1)}}
+async function loadAdv(){try{const a=await j('/p/adv');$('aUuid').value=a.uuid;$('aAh').value=a.ah;$('aRel').value=a.rel;$('aPol').value=a.pol;$('aGrace').value=a.grace;$('aEg').checked=!!a.eg;
+ $('aPin').textContent='PIN local (Wi-Fi de emergência e acesso .local): '+(a.pin||'ainda não recebido do servidor');show('vAdv')}catch(e){INFO.admin=false;msg(e.message,1);show('vLogin')}}
+async function saveAdv(){try{await post('/p/adv',{uuid:$('aUuid').value.trim().toLowerCase(),ah:$('aAh').value,rel:$('aRel').value,pol:$('aPol').value,grace:$('aGrace').value,eg:$('aEg').checked?1:0});
+ INFO.uuid=$('aUuid').value.trim().toLowerCase();msg('Salvo. Os ajustes sobem para o servidor quando o ESP reconectar.')}catch(e){msg(e.message,1)}}
+async function relayTest(){try{await post('/p/relay',{ah:$('aAh').value});msg('Relé acionado por 1,5 s: a fechadura deve TRAVAR e depois soltar. Se fez o contrário, troque a polaridade.')}catch(e){msg(e.message,1)}}
+async function factory(){if(!confirm('Apagar Wi-Fi, nome e ajustes deste ESP?'))return;try{await post('/p/factory',{});bye('Reset de fábrica feito. O ESP reinicia no modo de primeira instalação.')}catch(e){msg(e.message,1)}}
+info().then(()=>scan(0));
+</script></body></html>)HTML";
+
 bool portalAuthed() {
   if (!portalSession[0] || millis() - portalSessionAt > PORTAL_SESSION_MS) { portalSession[0] = 0; return false; }
   String c = web.header("Cookie");
@@ -505,114 +593,230 @@ bool portalAuthed() {
   return true;
 }
 
-void sendLoginPage(const char* msg) {
-  String h = F("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-               "<title>VENUE Lock</title><style>body{background:#0b0e13;color:#e9edf3;font:16px system-ui;padding:16px}"
-               "input,button{width:100%;box-sizing:border-box;padding:12px;margin:4px 0 10px;border:0;border-radius:10px;background:#1e2430;color:#e9edf3;font:inherit}"
-               "button{background:#1d3a35;color:#4fd1b5;font-weight:700}label{color:#8b94a5;font-size:14px}.e{color:#f06a6a}</style></head><body>"
-               "<h2 style='color:#4fd1b5'>VENUE Lock</h2><p style='color:#8b94a5'>Configuração protegida</p>"
-               "<form method=post action=/login><label>Senha de administrador</label>"
-               "<input name=p type=password autocomplete=current-password required autofocus><button>Entrar</button></form><p class=e>");
-  h += msg;
-  h += F("</p></body></html>");
+void jsonReply(int code, JsonDocument& d) {
+  String o; serializeJson(d, o);
   sendNoCache();
-  web.send(200, F("text/html"), h);
+  web.send(code, F("application/json"), o);
 }
 
-void handleLogin() {
+void jsonErr(int code, const char* e) {
+  JsonDocument d; d["e"] = e;
+  jsonReply(code, d);
+}
+
+void jsonOk() {
+  JsonDocument d; d["ok"] = true;
+  jsonReply(200, d);
+}
+
+bool requireAdmin() {
+  if (portalAuthed()) return true;
+  jsonErr(401, "Entre com a senha de administrador");
+  return false;
+}
+
+void pPage() {
   portalActivity = millis();
-  if (portalLockUntil && (int32_t)(millis() - portalLockUntil) < 0) return sendLoginPage("Muitas tentativas. Aguarde 1 minuto.");
+  sendNoCache();
+  web.send_P(200, PSTR("text/html"), PORTAL_HTML);
+}
+
+void pInfo() {
+  portalActivity = millis();
+  JsonDocument d;
+  d["fw"] = FW_VERSION; d["chip"] = String(ESP.getChipId(), HEX); d["uuid"] = cfg.uuid;
+  d["ssid"] = cfg.ssid; d["first"] = firstSetup; d["admin"] = portalAuthed();
+  jsonReply(200, d);
+}
+
+void pScan() {
+  portalActivity = millis();
+  int n = WiFi.scanComplete();
+  if (web.hasArg("r") && n != WIFI_SCAN_RUNNING) { WiFi.scanDelete(); n = WIFI_SCAN_FAILED; }
+  if (n == WIFI_SCAN_FAILED) WiFi.scanNetworks(true, false);
+  if (n < 0) { JsonDocument d; d["scanning"] = true; return jsonReply(200, d); }
+  // ordena por sinal e remove duplicadas (mesma rede em vários roteadores/repetidores)
+  int idx[48]; int m = 0;
+  for (int i = 0; i < n && m < 48; i++) if (WiFi.SSID(i).length()) idx[m++] = i;
+  for (int a = 0; a < m; a++) for (int b = a + 1; b < m; b++) if (WiFi.RSSI(idx[b]) > WiFi.RSSI(idx[a])) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
+  JsonDocument d;
+  JsonArray arr = d["nets"].to<JsonArray>();
+  for (int a = 0; a < m && arr.size() < 25; a++) {
+    String ss = WiFi.SSID(idx[a]);
+    bool dup = false;
+    for (JsonObject o : arr) if (ss == o["s"].as<const char*>()) { dup = true; break; }
+    if (dup) continue;
+    JsonObject o = arr.add<JsonObject>();
+    o["s"] = ss; o["r"] = WiFi.RSSI(idx[a]); o["e"] = WiFi.encryptionType(idx[a]) != ENC_TYPE_NONE;
+  }
+  jsonReply(200, d);
+}
+
+void pWifiStart() {
+  portalActivity = millis();
+  String ssid = web.arg("ssid"), pass = web.arg("pass");
+  ssid.trim();
+  if (ssid.isEmpty() || ssid.length() > 32) return jsonErr(400, "Nome da rede invalido");
+  if (pass.length() && (pass.length() < 8 || pass.length() > 63)) return jsonErr(400, "A senha do Wi-Fi precisa ter de 8 a 63 caracteres");
+  tSsid = ssid; tPass = pass; tMsg = ""; tState = T_TEST; tStart = millis();
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(tSsid.c_str(), tPass.c_str());
+  LOGF("[portal] testando Wi-Fi \"%s\"", tSsid.c_str());
+  jsonOk();
+}
+
+void pWifiStatus() {
+  portalActivity = millis();
+  JsonDocument d;
+  d["st"] = tState == T_TEST ? "testing" : tState == T_OK ? "ok" : tState == T_FAIL ? "fail" : "idle";
+  d["msg"] = tMsg;
+  if (tState == T_OK) d["rssi"] = WiFi.RSSI();
+  jsonReply(200, d);
+}
+
+void wifiTestTick() {
+  if (tState != T_TEST) return;
+  wl_status_t st = WiFi.status();
+  uint32_t el = millis() - tStart;
+  const char* fail = nullptr;
+  if (st == WL_CONNECTED) {
+    tState = T_OK;
+    LOGF("[portal] Wi-Fi OK: %s RSSI %d", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    return;
+  }
+  if (st == WL_WRONG_PASSWORD) fail = "Senha incorreta. Confira maiusculas/minusculas e tente de novo.";
+  else if (st == WL_CONNECT_FAILED && el > 3000) fail = "O roteador recusou a conexao. Confira a senha.";
+  else if (st == WL_NO_SSID_AVAIL && el > 8000) fail = "Rede nao encontrada: sinal fraco, nome errado ou rede so 5 GHz.";
+  else if (el > 20000) fail = "O roteador nao respondeu em 20 s. Aproxime o ESP do roteador e tente de novo.";
+  if (fail) {
+    tState = T_FAIL; tMsg = fail;
+    WiFi.disconnect(false);  // para de tentar: mantém o AP do portal estável
+    LOGF("[portal] Wi-Fi falhou: %s (status %d)", fail, (int)st);
+  }
+}
+
+void pSave() {
+  portalActivity = millis();
+  if (tState != T_OK) return jsonErr(409, "Teste a conexao Wi-Fi antes de salvar");
+  String uuid = web.arg("uuid"); uuid.trim(); uuid.toLowerCase();
+  bool canName = firstSetup || portalAuthed();
+  if (canName && uuid.length()) {
+    if (!validUuid(uuid.c_str())) return jsonErr(400, "Nome do ponto invalido: use a-z, 0-9, _ ou - (2 a 32)");
+    if (strcmp(cfg.uuid, uuid.c_str())) {
+      strlcpy(cfg.uuid, uuid.c_str(), sizeof(cfg.uuid));
+      strlcpy(cfg.name, cfg.uuid, sizeof(cfg.name));
+      cfg.pin[0] = 0;
+    }
+  }
+  strlcpy(cfg.ssid, tSsid.c_str(), sizeof(cfg.ssid));
+  strlcpy(cfg.pass, tPass.c_str(), sizeof(cfg.pass));
+  cfgSave();
+  logEvent("wifi_config", "portal", cfg.ssid);
+  LOGF("[portal] salvo: rede \"%s\", ponto %s", cfg.ssid, cfg.uuid);
+  jsonOk();
+  restartAt = millis() + 1200;
+}
+
+void pLogin() {
+  portalActivity = millis();
+  if (portalLockUntil && (int32_t)(millis() - portalLockUntil) < 0) return jsonErr(429, "Muitas tentativas. Aguarde 1 minuto.");
   portalLockUntil = 0;
   if (!ctEqualExact(web.arg("p"), String(VL_ADMIN_PASSWORD))) {
     if (++portalFails >= LOCAL_MAX_FAILS) { portalFails = 0; portalLockUntil = millis() + LOCAL_LOCKOUT_MS; logEvent("portal_bloq", "local"); }
-    LOGF("[portal] senha incorreta");
-    return sendLoginPage("Senha incorreta.");
+    LOGF("[portal] senha de admin incorreta");
+    return jsonErr(401, "Senha incorreta");
   }
   portalFails = 0;
   randomHex(portalSession);
   portalSessionAt = millis();
   logEvent("portal_login", "local");
   web.sendHeader(F("Set-Cookie"), String("vls=") + portalSession + "; Path=/; HttpOnly; Max-Age=600");
-  web.sendHeader(F("Location"), F("/"));
-  web.send(303, F("text/plain"), "");
+  jsonOk();
 }
 
-void handlePortal() {
+void pAdvGet() {
   portalActivity = millis();
-  if (!portalAuthed()) return sendLoginPage("");
-  String h = F("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-               "<title>VENUE Lock - Configurar</title><style>body{background:#0b0e13;color:#e9edf3;font:16px system-ui;padding:16px}"
-               "input,button{width:100%;box-sizing:border-box;padding:12px;margin:4px 0 10px;border:0;border-radius:10px;background:#1e2430;color:#e9edf3;font:inherit}"
-               "button{background:#1d3a35;color:#4fd1b5;font-weight:700}label{color:#8b94a5;font-size:14px}.r{display:flex;gap:8px;align-items:center}.r input{width:auto}</style></head><body>"
-               "<h2 style='color:#4fd1b5'>VENUE Lock</h2><p style='color:#8b94a5'>fw " FW_VERSION " &middot; chip ");
-  h += String(ESP.getChipId(), HEX);
-  h += F("</p><form method=post action=/save><datalist id=nets>");
-  h += scanOptions;
-  h += F("</datalist><label>Wi-Fi (SSID)</label><input name=ssid list=nets maxlength=32 required value=\"");
-  h += htmlEsc(cfg.ssid);
-  h += F("\"><label>Senha do Wi-Fi (vazio = manter)</label><input name=pass type=password maxlength=64>"
-         "<label>Nome do ponto (a-z 0-9 _ -; o mesmo nome do ponto no sistema)</label>"
-         "<input name=uuid maxlength=32 autocapitalize=none required value=\"");
-  h += htmlEsc(cfg.uuid);
-  h += F("\"><div class=r><input type=checkbox name=factory><label>Apagar tudo (reset de fábrica)</label></div>"
-         "<button>Salvar e reiniciar</button></form></body></html>");
-  sendNoCache();
-  web.send(200, F("text/html"), h);
+  if (!requireAdmin()) return;
+  JsonDocument d;
+  d["uuid"] = cfg.uuid; d["ah"] = cfg.activeHigh; d["rel"] = cfg.releaseMs;
+  d["pol"] = cfg.policy == POLICY_HOLD ? "hold" : "release"; d["grace"] = cfg.graceS;
+  d["eg"] = cfg.egress; d["pin"] = cfg.pin;
+  jsonReply(200, d);
 }
 
-void handleSave() {
+void pAdvSave() {
   portalActivity = millis();
-  if (!portalAuthed()) { web.send(403, F("text/plain"), F("Sessao expirada. Volte e entre com a senha.")); return; }
-  if (web.hasArg("factory")) {
-    cfgDefaults(); cfgSave();
-    web.send(200, F("text/plain"), F("Reset de fabrica feito. Reiniciando."));
-    restartAt = millis() + 800;
-    return;
+  if (!requireAdmin()) return;
+  String uuid = web.arg("uuid"); uuid.trim(); uuid.toLowerCase();
+  long rel = web.arg("rel").toInt(), grace = web.arg("grace").toInt();
+  String pol = web.arg("pol");
+  uint8_t eg = web.arg("eg") == "1", ah = web.arg("ah") == "0" ? 0 : 1;
+  if (!validUuid(uuid.c_str())) return jsonErr(400, "Nome do ponto invalido: use a-z, 0-9, _ ou - (2 a 32)");
+  if (rel < 1000 || rel > 60000) return jsonErr(400, "Tempo de liberacao: 1000 a 60000 ms");
+  if (grace < 10 || grace > 65535) return jsonErr(400, "Tempo sem servidor: 10 a 65535 s");
+  if (pol != "release" && pol != "hold") return jsonErr(400, "Politica invalida");
+  if (pol == "hold" && !eg) return jsonErr(409, "Manter trancado na queda exige saida livre por hardware instalada");
+  if (strcmp(cfg.uuid, uuid.c_str())) {
+    strlcpy(cfg.uuid, uuid.c_str(), sizeof(cfg.uuid));
+    strlcpy(cfg.name, cfg.uuid, sizeof(cfg.name));
+    cfg.pin[0] = 0;
   }
-  String ssid = web.arg("ssid"), pass = web.arg("pass"), uuid = web.arg("uuid");
-  ssid.trim(); uuid.trim(); uuid.toLowerCase();
-  String err;
-  if (ssid.isEmpty() || ssid.length() > 32) err = F("Nome do Wi-Fi invalido");
-  else if (!validUuid(uuid.c_str())) err = F("Nome do ponto invalido: use a-z, 0-9, _ ou - (2 a 32)");
-  if (err.length()) { web.send(400, F("text/plain"), err); return; }
-  bool identityChanged = strcmp(cfg.uuid, uuid.c_str()) != 0;
-  bool ssidChanged = strcmp(cfg.ssid, ssid.c_str()) != 0;
-  strlcpy(cfg.ssid, ssid.c_str(), sizeof(cfg.ssid));
-  // senha vazia mantém a atual; se trocou de rede, aceita vazia (rede aberta)
-  if (pass.length() || ssidChanged) strlcpy(cfg.pass, pass.c_str(), sizeof(cfg.pass));
-  strlcpy(cfg.uuid, uuid.c_str(), sizeof(cfg.uuid));
-  if (identityChanged) { strlcpy(cfg.name, cfg.uuid, sizeof(cfg.name)); cfg.pin[0] = 0; cfg.egress = 0; cfg.policy = POLICY_RELEASE; }
+  cfg.activeHigh = ah; cfg.releaseMs = rel; cfg.graceS = grace; cfg.egress = eg;
+  cfg.policy = pol == "hold" ? POLICY_HOLD : POLICY_RELEASE;
+  cfg.lcfgDirty = 1;
   cfgSave();
-  web.send(200, F("text/plain"), F("Salvo. Reiniciando para conectar..."));
+  logEvent("config_local", "portal");
+  LOGF("[portal] avançado salvo: ah=%d rel=%u grace=%u pol=%d eg=%d", ah, cfg.releaseMs, cfg.graceS, cfg.policy, eg);
+  jsonOk();
+}
+
+void pRelayTest() {
+  portalActivity = millis();
+  if (!requireAdmin()) return;
+  relayTestAh = web.arg("ah") == "0" ? 0 : 1;
+  digitalWrite(RELAY_GPIO, relayTestAh ? HIGH : LOW);  // energiza
+  relayTestUntil = (millis() + 1500) | 1;
+  LOGF("[portal] teste do relé (ativo %s)", relayTestAh ? "ALTO" : "BAIXO");
+  jsonOk();
+}
+
+void pFactory() {
+  portalActivity = millis();
+  if (!requireAdmin()) return;
+  cfgDefaults(); cfgSave();
+  LOGF("[portal] reset de fábrica");
+  jsonOk();
+  restartAt = millis() + 1200;
+}
+
+void pExit() {
+  portalActivity = millis();
+  jsonOk();
   restartAt = millis() + 800;
 }
 
 void startPortal() {
   portalMode = true;
   portalActivity = millis();
-  applyRelay();  // libera a porta enquanto alguém configura localmente
+  firstSetup = !cfg.ssid[0];
+  tState = T_IDLE;
+  applyRelay();  // porta livre enquanto alguém configura no local (igual ao firmware antigo)
   ws.disconnect();
   wsAuthed = false;
-  WiFi.mode(WIFI_STA);
-  int n = WiFi.scanNetworks();
-  scanOptions = "";
-  for (int i = 0; i < n && i < 20; i++) {
-    scanOptions += F("<option value=\"");
-    scanOptions += htmlEsc(WiFi.SSID(i).c_str());
-    scanOptions += F("\">");
-  }
-  WiFi.scanDelete();
-  WiFi.mode(WIFI_AP);
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false);  // para tentativas antigas: mantém o AP estável
+  WiFi.mode(WIFI_AP_STA);
   char ap[33]; snprintf(ap, sizeof(ap), "VENUE_Lock-%06x", ESP.getChipId());
-  bool secured = provisioned() && strlen(cfg.pin) >= 8;
-  WiFi.softAP(ap, secured ? cfg.pin : nullptr);
+  WiFi.softAP(ap);  // aberto: só existe na primeira instalação ou com o botão físico
   dns.start(53, "*", WiFi.softAPIP());
-  LOGF("[portal] AP %s (%s) em %s", ap, secured ? "senha = PIN" : "aberto", WiFi.softAPIP().toString().c_str());
+  WiFi.scanNetworks(true, false);
+  LOGF("[portal] AP %s em http://%s", ap, WiFi.softAPIP().toString().c_str());
   logEvent("portal", "botao");
 }
 
 // ------------------------------------------------------------------ roteamento web
-void routeRoot() { portalMode ? handlePortal() : handleLocalPage(); }
+void routeRoot() { portalMode ? pPage() : handleLocalPage(); }
 
 void routeNotFound() {
   if (portalMode) {
@@ -623,10 +827,22 @@ void routeNotFound() {
   }
 }
 
+// rotas /p/* só existem com o portal aberto
+#define PORTAL_ONLY(fn) []() { if (portalMode) fn(); else web.send(403, F("text/plain"), F("403")); }
+
 void setupWeb() {
   web.on("/", HTTP_GET, routeRoot);
-  web.on("/login", HTTP_POST, []() { if (portalMode) handleLogin(); else web.send(403, F("text/plain"), F("403")); });
-  web.on("/save", HTTP_POST, []() { if (portalMode) handleSave(); else web.send(403, F("text/plain"), F("403")); });
+  web.on("/p/info", HTTP_GET, PORTAL_ONLY(pInfo));
+  web.on("/p/scan", HTTP_GET, PORTAL_ONLY(pScan));
+  web.on("/p/wifi", HTTP_POST, PORTAL_ONLY(pWifiStart));
+  web.on("/p/wifi", HTTP_GET, PORTAL_ONLY(pWifiStatus));
+  web.on("/p/save", HTTP_POST, PORTAL_ONLY(pSave));
+  web.on("/p/login", HTTP_POST, PORTAL_ONLY(pLogin));
+  web.on("/p/adv", HTTP_GET, PORTAL_ONLY(pAdvGet));
+  web.on("/p/adv", HTTP_POST, PORTAL_ONLY(pAdvSave));
+  web.on("/p/relay", HTTP_POST, PORTAL_ONLY(pRelayTest));
+  web.on("/p/factory", HTTP_POST, PORTAL_ONLY(pFactory));
+  web.on("/p/exit", HTTP_POST, PORTAL_ONLY(pExit));
   web.on("/l/nonce", HTTP_GET, []() { if (portalMode) web.send(403); else handleNonce(); });
   web.on("/l/cmd", HTTP_POST, []() { if (portalMode) web.send(403); else handleLocalCmd(); });
   web.onNotFound(routeNotFound);
@@ -834,6 +1050,12 @@ void loop() {
 
   if (portalMode) {
     dns.processNextRequest();
+    wifiTestTick();
+    if (relayTestUntil && (int32_t)(now - relayTestUntil) >= 0) {
+      relayTestUntil = 0;
+      digitalWrite(RELAY_GPIO, relayTestAh ? LOW : HIGH);  // desenergiza
+      relayOn = false;
+    }
     if (provisioned() && now - portalActivity > PORTAL_IDLE_MS) { LOGF("[portal] ocioso: reiniciando"); ESP.restart(); }
     return;
   }
