@@ -25,8 +25,11 @@
 #include <ESP8266HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <memory>
+extern "C" {
+#include <user_interface.h>
+}
 
-#define FW_VERSION      "2.4.0"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.1"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -382,7 +385,8 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
         h["m"] = hmacHex(dkey, 32, String("hello|") + serverNonce + "|" + clientNonce);
         h["fw"] = FW_VERSION; h["ip"] = WiFi.localIP().toString(); h["host"] = mdnsName();
         h["rssi"] = WiFi.RSSI(); h["armed"] = (bool)cfg.armed; h["relay"] = relayOn; h["free"] = offlineFree;
-        h["boot"] = ESP.getResetReason(); h["tag"] = FW_TAG;
+        h["boot"] = ESP.getResetInfo(); h["tag"] = FW_TAG;  // inclui exceção/endereço se travou
+        h["heap"] = ESP.getFreeHeap();
         if (cfg.lcfgDirty) {
           JsonObject l = h["lcfg"].to<JsonObject>();
           l["policy"] = cfg.policy == POLICY_HOLD ? "hold" : "release";
@@ -1017,6 +1021,9 @@ void setup() {
 
   WiFi.persistent(false);
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
+  // Brasil: canais 1 a 13 (o padrão do SDK pode limitar a 1-11 e esconder redes nos canais 12/13)
+  wifi_country_t country = {"BR", 1, 13, WIFI_COUNTRY_POLICY_MANUAL};
+  if (!wifi_set_country(&country)) LOGF("[wifi] aviso: nao foi possivel ajustar canais 1-13");
   setupWeb();
   if (!provisioned()) {
     LOGF("[boot] sem configuração: portal aberto");

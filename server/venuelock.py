@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.3.0"
+VERSION = "2.3.1"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -799,7 +799,7 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
     ip = client_ip(request)
     st.update_device(did, fw=str(hello.get("fw", ""))[:24], ip=str(hello.get("ip", ip))[:45],
                      host=str(hello.get("host", ""))[:40], rssi=int(hello.get("rssi", 0)),
-                     boot=str(hello.get("boot", ""))[:40], armed=1 if hello.get("armed") else 0,
+                     boot=str(hello.get("boot", ""))[:160], armed=1 if hello.get("armed") else 0,
                      last_seen=time.time())
     lcfg = hello.get("lcfg")
     if isinstance(lcfg, dict):
@@ -808,7 +808,7 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
             st.event(did, "config", "esp:portal", json.dumps(applied, ensure_ascii=False))
             LOG.info("esp %s/%s: ajustes do portal local aplicados %s", user["username"], uuid, applied)
     st.close_outage(did)
-    st.event(did, "online", "esp", f"ip {ip} fw {hello.get('fw', '?')} boot={hello.get('boot', '')}")
+    st.event(did, "online", "esp", f"ip {ip} fw {hello.get('fw', '?')} heap {hello.get('heap', '?')} boot={hello.get('boot', '')}")
     if d["ota_ver"] and d["ota_ver"] == hello.get("fw") and d["fw"] != hello.get("fw"):
         st.event(did, "ota_ok", "esp", f"{d['fw']} -> {hello.get('fw')}")
     LOG.info("esp %s/%s online de %s", user["username"], uuid, ip)
