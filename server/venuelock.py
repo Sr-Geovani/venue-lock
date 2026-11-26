@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.3.1"
+VERSION = "2.4.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -643,11 +643,8 @@ async def h_fw_list(request: web.Request) -> web.Response:
         "SELECT version, md5, size, created_at, published FROM firmware ORDER BY created_at DESC LIMIT 20")})
 
 
-async def h_fw_upload(request: web.Request) -> web.Response:
-    u = current_user(request)
-    if not u["is_admin"]:
-        raise fail(web.HTTPForbidden, "apenas administradores")
-    data = await request.read()
+def store_firmware(st: Store, fwdir: str, data: bytes) -> tuple[str, str]:
+    """Valida, grava e publica um .bin do VENUE Lock. Retorna (versão, md5)."""
     if not 1024 < len(data) <= MAX_FW_BYTES or data[0] != 0xE9:
         raise ValueError("arquivo não é um firmware ESP8266 (.bin) válido")
     m = FW_TAG_RE.search(data)
@@ -655,8 +652,8 @@ async def h_fw_upload(request: web.Request) -> web.Response:
         raise ValueError("firmware sem a marca VLFW: não é o VENUE Lock (exporte o .bin do VENUE_Lock_v2)")
     ver = m.group(1).decode()
     md5 = hashlib.md5(data).hexdigest()
-    st = request.app[STORE]
-    path = os.path.join(request.app[FWDIR], f"{ver}.bin")
+    os.makedirs(fwdir, exist_ok=True)
+    path = os.path.join(fwdir, f"{ver}.bin")
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
@@ -665,6 +662,33 @@ async def h_fw_upload(request: web.Request) -> web.Response:
          "ON CONFLICT(version) DO UPDATE SET md5=excluded.md5, size=excluded.size, created_at=excluded.created_at",
          (ver, md5, len(data), time.time()))
     st.x("UPDATE firmware SET published=(version=?)", (ver,))
+    return ver, md5
+
+
+async def ota_loop(app: web.Application) -> None:
+    """A cada minuto, oferece a versão publicada aos ESPs online que estão desatualizados.
+    Cobre firmware publicado pelo terminal (publish-fw) e novas tentativas após falha."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            st = app[STORE]
+            for did in list(app[HUB].conns):
+                d = st.device(did)
+                if d:
+                    await maybe_ota(app, d)
+        except RuntimeError:
+            return
+        except Exception:
+            LOG.exception("ota_loop")
+
+
+async def h_fw_upload(request: web.Request) -> web.Response:
+    u = current_user(request)
+    if not u["is_admin"]:
+        raise fail(web.HTTPForbidden, "apenas administradores")
+    data = await request.read()
+    st = request.app[STORE]
+    ver, md5 = store_firmware(st, request.app[FWDIR], data)
     LOG.warning("firmware %s publicado por %s (%d bytes, md5 %s)", ver, u["username"], len(data), md5)
     sent = 0
     for did in list(request.app[HUB].conns):
@@ -879,7 +903,15 @@ async def h_health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "version": VERSION, "esp_online": len(request.app[HUB].conns)})
 
 
+OTA_TASK = web.AppKey("ota_task", asyncio.Task)
+
+
+async def on_startup(app: web.Application) -> None:
+    app[OTA_TASK] = asyncio.create_task(ota_loop(app))
+
+
 async def on_shutdown(app: web.Application) -> None:
+    app[OTA_TASK].cancel()
     hub = app[HUB]
     for ws in [c.ws for c in hub.conns.values()] + list(hub.uis):
         with contextlib.suppress(Exception):
@@ -894,6 +926,7 @@ def build_app(store: Store, fwdir: str) -> web.Application:
     os.makedirs(fwdir, exist_ok=True)
     app = web.Application(middlewares=[errors_mw], client_max_size=MAX_FW_BYTES + 65536)
     app[STORE], app[HUB], app[FAILS], app[FWDIR] = store, Hub(), {}, fwdir
+    app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     app.on_cleanup.append(on_cleanup)
     r = app.router
@@ -1106,6 +1139,28 @@ def cmd_reset_password(a: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_publish_fw(a: argparse.Namespace) -> int:
+    with open(a.path, "rb") as f:
+        data = f.read()
+    st = Store(a.db)
+    try:
+        ver, md5 = store_firmware(st, os.path.join(os.path.dirname(os.path.abspath(a.db)), "fw"), data)
+    finally:
+        st.close()
+    print(f"firmware {ver} publicado ({len(data)} bytes, md5 {md5}); os ESPs online atualizam em até 1 minuto")
+    return 0
+
+
+def cmd_fw_version(a: argparse.Namespace) -> int:
+    st = Store(a.db)
+    try:
+        fw = published_fw(st)
+    finally:
+        st.close()
+    print(fw["version"] if fw else "")
+    return 0
+
+
 def cmd_list(a: argparse.Namespace) -> int:
     st = Store(a.db)
     try:
@@ -1142,6 +1197,10 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--password")
     r.set_defaults(fn=cmd_reset_password)
     sub.add_parser("list").set_defaults(fn=cmd_list)
+    pf = sub.add_parser("publish-fw", help="publica um .bin do VENUE Lock")
+    pf.add_argument("path")
+    pf.set_defaults(fn=cmd_publish_fw)
+    sub.add_parser("fw-version", help="versão de firmware publicada").set_defaults(fn=cmd_fw_version)
     a = p.parse_args(argv)
     setup_logging(a.verbose, a.log_json)
     try:

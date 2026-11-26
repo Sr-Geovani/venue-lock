@@ -44,11 +44,21 @@ O secret fica gravado no firmware: não use "Gerar novo secret" no app sem neces
 porque todos os ESPs precisariam ser regravados por USB. O `.bin` publicado para atualização
 só é entregue a ESPs que provam conhecer o secret.
 
-## Atualizações seguintes (automáticas)
+## Atualizações seguintes (automáticas, sem Arduino IDE)
 
-1. Mude `FW_VERSION` no topo do `.ino`.
-2. Arduino IDE → Sketch → **Exportar binário compilado**.
-3. App → Conta → **Firmware dos ESPs** → Publicar. Os ESPs online baixam, conferem o MD5 e reiniciam.
+A VPS compila e publica o firmware sozinha:
+
+```bash
+cd /opt/venue-lock && git pull && ./install.sh lock.venuemarket.com.br
+```
+
+Se a versão do firmware (`FW_VERSION`) mudou, o instalador compila com o secret do banco e a
+senha do portal guardada em `data/firmware.conf` (pedida só na primeira vez) e publica. Os ESPs
+online com "atualização automática" instalam em até 1 minuto; os offline atualizam ao voltar.
+Só o firmware: `./firmware.sh` (ou `./firmware.sh --force`).
+
+Também dá para publicar manualmente um `.bin` exportado do Arduino IDE em App → Conta →
+Firmware dos ESPs.
 
 ## Segurança da porta (hardware)
 

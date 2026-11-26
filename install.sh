@@ -107,6 +107,14 @@ cat > /etc/cron.d/venuelock-backup <<'EOF'
 EOF
 log "Backup diário configurado (03:15)."
 
+# ----------------------------------------------------------------- firmware dos ESPs
+if [[ ${SKIP_FIRMWARE:-0} != 1 ]]; then
+  log "Verificando firmware dos ESPs (compila e publica se houver versão nova)..."
+  if ! "$INSTALL_DIR/firmware.sh"; then
+    warn "o firmware não foi publicado; o servidor continua normal. Tente: cd $INSTALL_DIR && ./firmware.sh"
+  fi
+fi
+
 # ----------------------------------------------------------------- teste final
 if curl -fsS --max-time 15 "https://$DOMAIN/health" >/dev/null 2>&1; then
   log "HTTPS ok: https://$DOMAIN"
@@ -121,7 +129,8 @@ cat <<EOF
  VENUE LOCK instalado.
    App (iPhone: Safari > Compartilhar > Tela de Início): https://$DOMAIN
    Logs:        cd $INSTALL_DIR && docker compose logs -f
-   Atualizar:   cd $INSTALL_DIR && git pull && ./install.sh $DOMAIN
+   Atualizar servidor + ESPs: cd $INSTALL_DIR && git pull && ./install.sh $DOMAIN
+   Só firmware: cd $INSTALL_DIR && ./firmware.sh
    Dispositivos: docker exec venuelock python venuelock.py list
 =====================================================================
 EOF
