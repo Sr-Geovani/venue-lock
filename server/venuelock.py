@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.5.0"
+VERSION = "2.5.1"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -628,7 +628,8 @@ async def maybe_ota(app: web.Application, d: dict, force: bool = False) -> str:
             return "atualização automática desligada"
         if d["ota_ver"] == fw["version"] and d["ota_at"] and time.time() - d["ota_at"] < OTA_RETRY_S:
             return "aguardando nova tentativa"
-    await c.send_signed({"k": "ota", "path": f"/fw/{fw['version']}.bin", "md5": fw["md5"], "ver": fw["version"]})
+    await c.send_signed({"k": "ota", "path": f"/fw/{fw['version']}.bin", "md5": fw["md5"], "ver": fw["version"],
+                         "size": fw["size"]})
     st.update_device(d["id"], ota_ver=fw["version"], ota_at=time.time())
     st.event(d["id"], "ota_enviado", "servidor", f"{d['fw'] or '?'} -> {fw['version']}")
     LOG.info("ota %s: %s -> %s", d["uuid"], d["fw"], fw["version"])

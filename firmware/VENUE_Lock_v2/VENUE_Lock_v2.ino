@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.1"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.2"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -83,7 +83,7 @@ struct Config {
   uint32_t crc;
 } cfg;
 
-struct Ev { uint32_t at; char k[14]; char src[8]; char d[24]; };
+struct Ev { uint32_t at; char k[14]; char src[8]; char d[56]; };
 static const uint8_t EVQ = 24;
 Ev evq[EVQ];
 uint8_t evHead = 0, evLen = 0;
@@ -349,6 +349,14 @@ void handleSigned(const char* p, const char* s) {
                                cfg.policy, cfg.graceS, cfg.releaseMs, cfg.egress); }
   } else if (!strcmp(k, "ota")) {
     String path = d["path"] | "", md5 = d["md5"] | "", ver = d["ver"] | "";
+    uint32_t size = d["size"] | 0;
+    // Confere o espaço ANTES de desconectar: sem espaço, avisa e continua online
+    if (size && size > ESP.getFreeSketchSpace()) {
+      char e[56];
+      snprintf(e, sizeof(e), "%s sem espaco %u/%u: regrave USB FS:none", ver.c_str(), size, ESP.getFreeSketchSpace());
+      logEvent("ota_falha", "esp", e);
+      return;
+    }
     if (path.startsWith("/fw/") && md5.length() == 32 && ver.length() && ver != FW_VERSION) {
       otaPath = path; otaMd5 = md5; otaVer = ver; otaPending = true;
       LOGF("[ota] agendado %s -> %s", FW_VERSION, ver.c_str());
@@ -997,6 +1005,8 @@ void runOta() {
   LOGF("[ota] falhou: %s", err.c_str());
   String d = otaVer + " " + err;
   logEvent("ota_falha", "esp", d.c_str());  // sobe quando o WebSocket reconectar
+  // A desconexão foi provocada pela atualização: não conta como queda de internet
+  lastLinkMs = millis();
 }
 
 // ------------------------------------------------------------------ setup / loop
