@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.3"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.4"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -434,6 +434,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
         h["rssi"] = WiFi.RSSI(); h["armed"] = (bool)cfg.armed; h["relay"] = relayOn; h["free"] = offlineFree;
         h["boot"] = ESP.getResetInfo(); h["tag"] = FW_TAG;  // inclui exceção/endereço se travou
         h["heap"] = ESP.getFreeHeap();
+        h["otafree"] = ESP.getFreeSketchSpace();  // espaço para a próxima atualização
         if (cfg.lcfgDirty) {
           JsonObject l = h["lcfg"].to<JsonObject>();
           l["policy"] = cfg.policy == POLICY_HOLD ? "hold" : "release";

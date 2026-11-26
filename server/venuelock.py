@@ -38,7 +38,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.6.1"
+VERSION = "2.6.2"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -909,7 +909,9 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
             st.event(did, "config", "esp:portal", json.dumps(applied, ensure_ascii=False))
             LOG.info("esp %s/%s: ajustes do portal local aplicados %s", user["username"], uuid, applied)
     st.close_outage(did)
-    st.event(did, "online", "esp", f"ip {ip} fw {hello.get('fw', '?')} heap {hello.get('heap', '?')} boot={hello.get('boot', '')}")
+    otafree = hello.get("otafree")
+    ota_txt = f" ota {int(otafree) // 1024} KB livres" if isinstance(otafree, int) else ""
+    st.event(did, "online", "esp", f"ip {ip} fw {hello.get('fw', '?')} heap {hello.get('heap', '?')}{ota_txt} boot={hello.get('boot', '')}")
     if d["ota_ver"] and d["ota_ver"] == hello.get("fw") and d["fw"] != hello.get("fw"):
         st.event(did, "ota_ok", "esp", f"{d['fw']} -> {hello.get('fw')}")
     LOG.info("esp %s/%s online de %s", user["username"], uuid, ip)
