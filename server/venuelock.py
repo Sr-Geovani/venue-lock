@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.5.2"
+VERSION = "2.5.3"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -815,6 +815,13 @@ async def handle_esp_msg(app: web.Application, c: DevConn, m: dict) -> None:
         ago = max(0, min(int(m.get("ago", 0)), 30 * 86400 * 1000))
         st.event(c.did, str(m.get("k", "?"))[:24], f"esp:{str(m.get('src', '?'))[:16]}",
                  str(m.get("d", ""))[:120] or None, ts=time.time() - ago / 1000)
+        if m.get("k") == "ota_falha" and "sem espaco" in str(m.get("d", "")):
+            # Memória gravada com FS:64KB: OTA nunca vai caber. Para de tentar (cada tentativa desconecta).
+            st.update_device(c.did, auto_update=0)
+            st.event(c.did, "config", "servidor",
+                     "atualização automática desligada: regrave por USB com Flash Size 1MB (FS:none)")
+            LOG.warning("device %s sem espaço para OTA: atualização automática desligada", c.did)
+            await hub.push(st, c.did)
     elif t == "otaerr":
         st.event(c.did, "ota_falha", "esp", str(m.get("e", ""))[:120])
     elif t == "ping":
