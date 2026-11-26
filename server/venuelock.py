@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -679,6 +679,13 @@ async def h_fw_file(request: web.Request) -> web.StreamResponse:
     path = os.path.join(request.app[FWDIR], f"{ver}.bin")
     if not FWVER_RE.match(ver) or not os.path.isfile(path):
         raise web.HTTPNotFound()
+    # O .bin contém o secret da conta: só entrega a um ESP que prove conhecê-lo.
+    user = request.app[STORE].user_by_name(request.query.get("u", "").lower())
+    uuid, tok = request.query.get("d", ""), request.query.get("t", "").lower()
+    if user is None or not UUID_RE.match(uuid) or not hmac.compare_digest(
+            hmac_hex(device_key(user["secret"], uuid), f"fw|{ver}"), tok):
+        LOG.warning("download de firmware %s negado para %s", ver, client_ip(request))
+        raise web.HTTPNotFound()
     return web.FileResponse(path, headers={"Content-Type": "application/octet-stream"})
 
 
@@ -987,7 +994,7 @@ function acct(){const masked=ME.secret.slice(0,4)+"…"+ME.secret.slice(-4);
  const out=[el("div",{class:"card"},el("strong",{},"Seu perfil"),el("div",{class:"grid2"},el("div",{class:"cell mut"},"Usuário",el("b",{},ME.username)),el("div",{class:"cell mut"},"Tipo",el("b",{},ME.is_admin?"Administrador":"Usuário comum")))),pw,
   el("div",{class:"card"},el("strong",{},"Secret do ESP"),el("p",{class:"mut"},"Configure no portal do ESP junto com o usuário. Com ele, o ESP se cadastra sozinho na sua conta."),el("code",{},masked),
    el("div",{class:"row",style:"margin-top:10px"},el("button",{onclick:()=>navigator.clipboard.writeText(ME.secret).then(()=>toast("Secret copiado"),()=>toast("Falha ao copiar"))},"Copiar"),
-    el("button",{class:"btn-bad",onclick:async()=>{if(!confirm("Gerar novo secret? TODOS os ESPs desta conta desconectam até serem reconfigurados."))return;try{ME.secret=(await api("POST","/api/me/secret")).secret;render();toast("Novo secret gerado")}catch(e){toast(e.message)}}},"Gerar novo"))),
+    el("button",{class:"btn-bad",onclick:async()=>{if(!confirm("Gerar novo secret? TODOS os ESPs desta conta param de conectar e precisam ser regravados por USB com o secret novo. Só faça isso se o secret vazou."))return;try{ME.secret=(await api("POST","/api/me/secret")).secret;render();toast("Novo secret gerado")}catch(e){toast(e.message)}}},"Gerar novo"))),
   el("div",{class:"card"},el("strong",{},"Conexão"),el("div",{class:"banner "+(ws&&ws.readyState===1?"":"b-warn")},ws&&ws.readyState===1?"Tempo real ativo":"Sem conexão em tempo real — reconectando"))];
  if(ME.is_admin){const nu=el("form",{class:"card"},el("strong",{},"Criar usuário"),el("label",{},"Usuário"),el("input",{name:"u",autocapitalize:"none",required:true}),el("label",{},"Senha"),el("input",{name:"p",type:"password",minlength:6,required:true}),
    el("label",{class:"row"},el("input",{name:"a",type:"checkbox",style:"width:auto"}),"Administrador"),el("button",{class:"btn-acc full",style:"margin-top:12px"},"Criar"));

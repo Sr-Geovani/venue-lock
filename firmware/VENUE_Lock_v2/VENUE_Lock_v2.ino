@@ -26,7 +26,20 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 
-#define FW_VERSION      "2.1.0"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.2.0"     // mude a cada nova versão antes de exportar o .bin
+
+// ============================ CONFIGURAÇÃO FIXA ==============================
+// Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
+// aparecem Wi-Fi e nome do ponto. Cole o secret (app -> Conta -> Secret do ESP)
+// antes de compilar. NUNCA envie este arquivo com o secret para o GitHub.
+#define VL_SERVER_HOST    "lock.venuemarket.com.br"
+#define VL_SERVER_PORT    443
+#define VL_ACCOUNT_USER   "venue"
+#define VL_ACCOUNT_SECRET "COLE_O_SECRET_AQUI"
+#define RELAY_ACTIVE_HIGH 1          // ESP-01S Relay padrão: 1. Só mude se o relé funcionar invertido.
+static_assert(sizeof(VL_ACCOUNT_SECRET) - 1 >= 20,
+              "Cole o secret da conta em VL_ACCOUNT_SECRET (app VENUE -> Conta -> Secret do ESP)");
+// =============================================================================
 #define RELAY_GPIO      0
 #define BUTTON_GPIO     2        // botão para GND (INPUT_PULLUP). Não pressionar no boot.
 #define BUTTON_ENABLED  1
@@ -142,13 +155,6 @@ bool validUuid(const char* s) {
   return true;
 }
 
-bool validUser(const char* s) {
-  size_t n = strlen(s);
-  if (n < 3 || n > 32) return false;
-  for (size_t i = 0; i < n; i++) if (!(islower(s[i]) || isdigit(s[i]) || s[i] == '_' || s[i] == '.' || s[i] == '-')) return false;
-  return true;
-}
-
 String htmlEsc(const char* s) {
   String o;
   for (; *s; s++) {
@@ -164,7 +170,7 @@ String mdnsName() {
 }
 
 bool provisioned() {
-  return cfg.ssid[0] && cfg.host[0] && cfg.user[0] && strlen(cfg.secret) >= 20 && validUuid(cfg.uuid);
+  return cfg.ssid[0] && validUuid(cfg.uuid);
 }
 
 // ------------------------------------------------------------------ config
@@ -199,6 +205,12 @@ void cfgLoad() {
   cfg.uuid[32] = cfg.name[32] = cfg.pin[16] = 0;
   if (cfg.graceS < 10) cfg.graceS = 60;
   if (cfg.releaseMs < 1000 || cfg.releaseMs > 60000) cfg.releaseMs = 5000;
+  // Servidor, conta, secret e polaridade vêm sempre do firmware (não editáveis no campo)
+  strlcpy(cfg.host, VL_SERVER_HOST, sizeof(cfg.host));
+  cfg.port = VL_SERVER_PORT;
+  strlcpy(cfg.user, VL_ACCOUNT_USER, sizeof(cfg.user));
+  strlcpy(cfg.secret, VL_ACCOUNT_SECRET, sizeof(cfg.secret));
+  cfg.activeHigh = RELAY_ACTIVE_HIGH;
 }
 
 void deriveDeviceKey() {
@@ -477,19 +489,10 @@ void handlePortal() {
   h += F("</datalist><label>Wi-Fi (SSID)</label><input name=ssid list=nets maxlength=32 required value=\"");
   h += htmlEsc(cfg.ssid);
   h += F("\"><label>Senha do Wi-Fi (vazio = manter)</label><input name=pass type=password maxlength=64>"
-         "<label>Servidor</label><input name=host maxlength=63 required value=\"");
-  h += htmlEsc(cfg.host);
-  h += F("\"><label>Porta (443 = TLS)</label><input name=port type=number min=1 max=65535 value=\"");
-  h += String(cfg.port);
-  h += F("\"><label>Usuário da conta</label><input name=user maxlength=32 autocapitalize=none required value=\"");
-  h += htmlEsc(cfg.user);
-  h += F("\"><label>Secret do ESP (aba Conta do app; vazio = manter)</label><input name=secret maxlength=64 autocomplete=off>"
-         "<label>Identificador (uuid: a-z 0-9 _ -, vira nome.local)</label><input name=uuid maxlength=32 required value=\"");
+         "<label>Nome do ponto (a-z 0-9 _ -; o mesmo nome do ponto no sistema)</label>"
+         "<input name=uuid maxlength=32 autocapitalize=none required value=\"");
   h += htmlEsc(cfg.uuid);
-  h += F("\"><div class=r><input type=checkbox name=ah ");
-  h += cfg.activeHigh ? F("checked") : F("");
-  h += F("><label>Relé ativo em nível ALTO (padrão do módulo)</label></div>"
-         "<div class=r><input type=checkbox name=factory><label>Apagar tudo (reset de fábrica)</label></div>"
+  h += F("\"><div class=r><input type=checkbox name=factory><label>Apagar tudo (reset de fábrica)</label></div>"
          "<button>Salvar e reiniciar</button></form></body></html>");
   sendNoCache();
   web.send(200, F("text/html"), h);
@@ -503,29 +506,19 @@ void handleSave() {
     restartAt = millis() + 800;
     return;
   }
-  String ssid = web.arg("ssid"), pass = web.arg("pass"), host = web.arg("host"), user = web.arg("user"),
-         secret = web.arg("secret"), uuid = web.arg("uuid");
-  ssid.trim(); host.trim(); user.trim(); user.toLowerCase(); secret.trim(); uuid.trim(); uuid.toLowerCase();
-  long port = web.arg("port").toInt();
+  String ssid = web.arg("ssid"), pass = web.arg("pass"), uuid = web.arg("uuid");
+  ssid.trim(); uuid.trim(); uuid.toLowerCase();
   String err;
-  if (ssid.isEmpty() || ssid.length() > 32) err = F("SSID invalido");
-  else if (host.isEmpty() || host.length() > 63 || host.indexOf('/') >= 0) err = F("Servidor invalido (so o dominio, sem https://)");
-  else if (port < 1 || port > 65535) err = F("Porta invalida");
-  else if (!validUser(user.c_str())) err = F("Usuario invalido");
-  else if (!validUuid(uuid.c_str())) err = F("Identificador invalido");
-  else if (secret.length() && (secret.length() < 20 || secret.length() > 64)) err = F("Secret invalido");
-  else if (!secret.length() && strlen(cfg.secret) < 20) err = F("Informe o secret");
+  if (ssid.isEmpty() || ssid.length() > 32) err = F("Nome do Wi-Fi invalido");
+  else if (!validUuid(uuid.c_str())) err = F("Nome do ponto invalido: use a-z, 0-9, _ ou - (2 a 32)");
   if (err.length()) { web.send(400, F("text/plain"), err); return; }
-  bool identityChanged = strcmp(cfg.uuid, uuid.c_str()) || strcmp(cfg.user, user.c_str()) || secret.length();
+  bool identityChanged = strcmp(cfg.uuid, uuid.c_str()) != 0;
+  bool ssidChanged = strcmp(cfg.ssid, ssid.c_str()) != 0;
   strlcpy(cfg.ssid, ssid.c_str(), sizeof(cfg.ssid));
-  if (pass.length()) strlcpy(cfg.pass, pass.c_str(), sizeof(cfg.pass));
-  strlcpy(cfg.host, host.c_str(), sizeof(cfg.host));
-  cfg.port = port;
-  strlcpy(cfg.user, user.c_str(), sizeof(cfg.user));
-  if (secret.length()) strlcpy(cfg.secret, secret.c_str(), sizeof(cfg.secret));
+  // senha vazia mantém a atual; se trocou de rede, aceita vazia (rede aberta)
+  if (pass.length() || ssidChanged) strlcpy(cfg.pass, pass.c_str(), sizeof(cfg.pass));
   strlcpy(cfg.uuid, uuid.c_str(), sizeof(cfg.uuid));
   if (identityChanged) { strlcpy(cfg.name, cfg.uuid, sizeof(cfg.name)); cfg.pin[0] = 0; cfg.egress = 0; cfg.policy = POLICY_RELEASE; }
-  cfg.activeHigh = web.hasArg("ah") ? 1 : 0;
   cfgSave();
   web.send(200, F("text/plain"), F("Salvo. Reiniciando para conectar..."));
   restartAt = millis() + 800;
@@ -661,7 +654,9 @@ bool doOta(String& err) {
   }
   HTTPClient http;
   http.setTimeout(20000);
-  if (!http.begin(*client, String(cfg.host), cfg.port, otaPath, tls)) { err = "begin"; return false; }
+  // Download autenticado: o servidor só entrega o .bin a um ESP com o secret correto
+  String q = otaPath + "?u=" + cfg.user + "&d=" + cfg.uuid + "&t=" + hmacHex(dkey, 32, String("fw|") + otaVer);
+  if (!http.begin(*client, String(cfg.host), cfg.port, q, tls)) { err = "begin"; return false; }
   int code = http.GET();
   if (code != HTTP_CODE_OK) { err = "http " + String(code); http.end(); return false; }
   int len = http.getSize();
