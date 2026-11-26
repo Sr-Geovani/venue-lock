@@ -26,7 +26,7 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 
-#define FW_VERSION      "2.3.1"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.3.2"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -393,7 +393,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
       break;
     }
     case WStype_ERROR:
-      LOGF("[ws] erro");
+      LOGF("[ws] erro: %.*s", (int)len, payload ? (const char*)payload : "");
       break;
     default:
       break;
@@ -635,9 +635,31 @@ void setupWeb() {
 }
 
 // ------------------------------------------------------------------ Wi-Fi / AP de emergência
+const char* wifiReason(wl_status_t st) {
+  switch (st) {
+    case WL_NO_SSID_AVAIL:   return "rede nao encontrada (nome errado, longe ou so 5 GHz)";
+    case WL_CONNECT_FAILED:  return "falha ao conectar (senha errada?)";
+    case WL_WRONG_PASSWORD:  return "senha do Wi-Fi errada";
+    case WL_DISCONNECTED:    return "tentando conectar";
+    case WL_IDLE_STATUS:     return "aguardando";
+    case WL_CONNECTION_LOST: return "conexao perdida";
+    default:                 return "outro";
+  }
+}
+
 void wifiTick() {
   uint32_t now = millis();
-  bool up = WiFi.status() == WL_CONNECTED;
+  wl_status_t st = WiFi.status();
+  bool up = st == WL_CONNECTED;
+  static wl_status_t lastSt = WL_IDLE_STATUS;
+  static uint32_t lastLog = 0;
+  static bool wasUp = false;
+  if (up && !wasUp) LOGF("[wifi] conectado em \"%s\" IP %s RSSI %d dBm", cfg.ssid, WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  if (!up && (st != lastSt || now - lastLog > 10000)) {
+    LOGF("[wifi] sem conexao com \"%s\": %s (status %d)", cfg.ssid, wifiReason(st), (int)st);
+    lastLog = now;
+  }
+  lastSt = st; wasUp = up;
   if (up) {
     wifiDownSince = 0;
     if (!mdnsUp) {
@@ -771,7 +793,8 @@ void setup() {
 #endif
 #if SERIAL_DEBUG
   Serial.begin(115200);
-  delay(50);
+  delay(200);
+  Serial.println();
 #endif
   LOGF("\n[boot] VENUE Lock fw %s | reset: %s | heap %u", FW_VERSION, ESP.getResetReason().c_str(), ESP.getFreeHeap());
   logEvent("boot", "esp", ESP.getResetReason().c_str());
@@ -789,6 +812,7 @@ void setup() {
   WiFi.hostname(mdnsName());
   WiFi.setAutoReconnect(true);
   WiFi.begin(cfg.ssid, cfg.pass);
+  LOGF("[wifi] conectando em \"%s\" (senha com %u caracteres)", cfg.ssid, (unsigned)strlen(cfg.pass));
   wsStart();
   lastLinkMs = millis();  // tolerância de queda conta a partir do boot
 }
