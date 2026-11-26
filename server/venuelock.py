@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.5.3"
+VERSION = "2.6.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -971,6 +971,24 @@ async def h_icon(_: web.Request) -> web.Response:
     return web.Response(text=svg, content_type="image/svg+xml")
 
 
+# Service worker: o app abre mesmo sem internet e mostra o acesso local das portas
+SW_JS = """
+const C = "venue-v1";
+self.addEventListener("install", e => { e.waitUntil(caches.open(C).then(c => c.addAll(["/", "/manifest.json", "/icon.svg"]))); self.skipWaiting(); });
+self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(k => Promise.all(k.filter(x => x !== C).map(x => caches.delete(x))))); self.clients.claim(); });
+self.addEventListener("fetch", e => {
+  const u = new URL(e.request.url);
+  if (e.request.method !== "GET" || u.origin !== location.origin || u.pathname.startsWith("/api/") || u.pathname.startsWith("/ws/")) return;
+  e.respondWith(fetch(e.request).then(r => { if (r.ok) { const cp = r.clone(); caches.open(C).then(c => c.put(e.request, cp)); } return r; })
+    .catch(() => caches.match(e.request).then(r => r || caches.match("/"))));
+});
+"""
+
+
+async def h_sw(_: web.Request) -> web.Response:
+    return web.Response(text=SW_JS, content_type="application/javascript", headers={"Cache-Control": "no-cache"})
+
+
 async def h_health(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "version": VERSION, "esp_online": len(request.app[HUB].conns)})
 
@@ -1005,6 +1023,7 @@ def build_app(store: Store, fwdir: str) -> web.Application:
     r.add_get("/", h_index)
     r.add_get("/manifest.json", h_manifest)
     r.add_get("/icon.svg", h_icon)
+    r.add_get("/sw.js", h_sw)
     r.add_get("/health", h_health)
     r.add_get("/ws/esp", ws_esp)
     r.add_get("/ws/ui", ws_ui)

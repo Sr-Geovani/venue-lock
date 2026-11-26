@@ -28,6 +28,7 @@ input:focus,select:focus{border-color:var(--acc)}
 label.f{display:block;margin:12px 0 5px;color:var(--mut);font-size:13px}
 .check{display:flex;gap:10px;align-items:flex-start;margin-top:12px;color:var(--fg);font-size:14px}.check input{width:auto;margin-top:3px;accent-color:var(--acc)}
 .mut{color:var(--mut)}.small{font-size:13px}.hidden{display:none!important}
+a{color:inherit;text-decoration:none}a button{color:inherit}
 .row{display:flex;gap:8px;align-items:center}.between{justify-content:space-between}.wrap{flex-wrap:wrap}.grow{flex:1}
 
 /* layout */
@@ -202,6 +203,21 @@ async function cmd(d,a,btn){
   try{await api("POST",`/api/devices/${d.id}/cmd`,{a});toast(a==="release"?`Liberado por ${d.release_ms/1000} s`:a==="lock"?"Trancado":a==="unlock"?"Destrancado":"Comando enviado")}
   catch(e){toast(e.message)}finally{if(btn)btn.disabled=false}}
 function localUrl(d){return`http://${d.host||d.uuid.replace(/_/g,"-")}.local/`}
+function ipUrl(d){return d.ip&&/^\d+\.\d+\.\d+\.\d+$/.test(d.ip)?`http://${d.ip}/`:null}
+function localLinks(d){const ip=ipUrl(d);return el("div",{class:"row wrap",style:"margin-top:8px"},
+  el("a",{href:localUrl(d),target:"_blank"},el("button",{class:"acc"},"Abrir pelo nome")),
+  ip?el("a",{href:ip,target:"_blank"},el("button",{},"Abrir pelo IP "+d.ip)):null)}
+/* cache dos dispositivos para o modo sem internet */
+function saveOffline(){try{localStorage.setItem("vl_devs",JSON.stringify([...DEV.values()].map(d=>({id:d.id,name:d.name,uuid:d.uuid,host:d.host,ip:d.ip,pin:d.pin}))))}catch(e){}}
+function offlineMode(){let devs=[];try{devs=JSON.parse(localStorage.getItem("vl_devs")||"[]")}catch(e){}
+  $("#vLogin").classList.add("hidden");$("#vApp").classList.remove("hidden");$("#nav").replaceChildren();
+  $("#hT").textContent="Sem internet";$("#hS").textContent="Acesso direto às portas pela rede Wi-Fi local";setLive(false);
+  $("#main").replaceChildren(
+    el("div",{class:"banner b-warn",style:"margin:0 0 12px"},"O servidor não está acessível. Conectado no mesmo Wi-Fi da porta (ou no Wi-Fi de emergência VENUE-…), toque para abrir o controle local e use o PIN."),
+    devs.length?el("div",{class:"grid"},devs.map(d=>el("div",{class:"card"},el("div",{class:"dev-name"},d.name),el("div",{class:"small mut"},d.uuid+(d.pin?" · PIN "+d.pin:"")),localLinks(d),
+      el("div",{class:"small mut",style:"margin-top:8px"},"Wi-Fi de emergência: VENUE-"+d.uuid+" → http://192.168.4.1")))):
+      el("div",{class:"card empty"},"Abra o app uma vez com internet para guardar o acesso local das portas."),
+    el("button",{class:"full",style:"margin-top:14px",onclick:()=>location.reload()},"Tentar de novo"))}
 
 /* ---------- telas ---------- */
 const ICONS={home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>',
@@ -222,7 +238,7 @@ function homeCard(d){const[s,pc]=stateOf(d);
       el("button",{disabled:!d.online,onclick:e=>cmd(d,d.armed?"unlock":"lock",e.currentTarget)},d.armed?"Destrancar":"Trancar"),
       el("button",{onclick:()=>openDevice(d.id,"log")},"Registros"),
       el("button",{onclick:()=>openDevice(d.id,"ajustes")},"Ajustes")),
-    d.online?null:el("div",{class:"banner b-info"},"Sem internet no local? Na mesma rede Wi-Fi use ",el("a",{href:localUrl(d),target:"_blank",style:"color:inherit;font-weight:600"},"o acesso local")," com o PIN."))}
+    d.online?null:el("div",{class:"banner b-info"},"Sem internet no local? Na mesma rede Wi-Fi da porta abra o controle direto (PIN "+d.pin+"):",localLinks(d)))}
 
 function devRow(d){const[s,,dc]=stateOf(d);
   return el("div",{class:"item",onclick:()=>openDevice(d.id,"log")},el("span",{class:"dot "+dc}),
@@ -320,7 +336,7 @@ function settingsView(d){
     el("div",{class:"actions"},
       el("button",{type:"button",disabled:!d.online,onclick:e=>cmd(d,"reboot",e.currentTarget)},"Reiniciar"),
       el("button",{type:"button",disabled:!d.online,onclick:async()=>{try{await api("POST",`/api/devices/${d.id}/ota`);toast("Atualização enviada")}catch(e){toast(e.message)}}},"Atualizar fw"),
-      el("button",{type:"button",onclick:()=>window.open(localUrl(d),"_blank")},"Acesso local")),
+      el("button",{type:"button",onclick:()=>window.open(ipUrl(d)||localUrl(d),"_blank")},"Acesso local")),
     el("div",{class:"small mut",style:"margin-top:10px"},`Firmware ${d.fw||"?"} · IP ${d.ip||"—"} · sinal ${d.rssi?d.rssi+" dBm":"—"}`),
     el("button",{type:"button",class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm(`Remover "${d.name}" do painel? Ele volta a aparecer se reconectar.`))return;try{await api("DELETE","/api/devices/"+d.id);closeSheet()}catch(e){toast(e.message)}}},"Remover dispositivo"));
   f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);
@@ -362,17 +378,19 @@ function connectWS(){clearTimeout(wsT);if(ws){ws.onclose=null;ws.close()}
   ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws/ui?s=${encodeURIComponent(TOK)}`);
   ws.onopen=()=>setLive(true);
   ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="snapshot"){DEV.clear();m.devices.forEach(d=>DEV.set(d.id,d))}else if(m.type==="device")DEV.set(m.device.id,m.device);else if(m.type==="removed")DEV.delete(m.id);
-    if(TAB!=="acct")render();
+    saveOffline();if(TAB!=="acct")render();
     if(SHEET&&SHEET.type==="dev"&&m.type==="device"&&m.device.id===SHEET.id){const[s]=stateOf(m.device);$("#shS").textContent=`${s} · ${m.device.uuid}`}};
   ws.onclose=()=>{setLive(false);if(TOK)wsT=setTimeout(connectWS,3000)}}
-async function load(){const r=await api("GET","/api/devices");DEV.clear();r.devices.forEach(d=>DEV.set(d.id,d));render()}
+async function load(){const r=await api("GET","/api/devices");DEV.clear();r.devices.forEach(d=>DEV.set(d.id,d));saveOffline();render()}
 async function start(){if(!TOK){$("#vLogin").classList.remove("hidden");$("#vApp").classList.add("hidden");return}
-  try{ME=await api("GET","/api/me");$("#vLogin").classList.add("hidden");$("#vApp").classList.remove("hidden");await load();connectWS()}catch(e){toast(e.message)}}
+  try{ME=await api("GET","/api/me");$("#vLogin").classList.add("hidden");$("#vApp").classList.remove("hidden");await load();connectWS()}
+  catch(e){if(e instanceof TypeError)offlineMode();else toast(e.message)}}
 function logout(){if(TOK)fetch("/api/logout",{method:"POST",headers:{"Authorization":"Bearer "+TOK}}).catch(()=>{});TOK="";ME=null;try{localStorage.removeItem("vl_tok")}catch(e){}
   if(ws){ws.onclose=null;ws.close();ws=null}clearTimeout(wsT);DEV.clear();if($("#sheet").open)closeSheet();start()}
 $("#fLogin").onsubmit=async e=>{e.preventDefault();try{TOK=(await api("POST","/api/login",{username:$("#lu").value.trim().toLowerCase(),password:$("#lp").value})).token;try{localStorage.setItem("vl_tok",TOK)}catch(err){}$("#lp").value="";start()}catch(err){toast(err.message)}};
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&TOK&&(!ws||ws.readyState>1))connectWS()});
 setInterval(()=>{if(TAB!=="acct"&&!document.hidden)render()},30000);
+if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
 start();
 </script>
 </body>
