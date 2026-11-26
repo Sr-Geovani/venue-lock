@@ -29,6 +29,7 @@ import sqlite3
 import sys
 import threading
 import time
+import unicodedata
 from typing import Any
 
 try:
@@ -37,7 +38,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.6.0"
+VERSION = "2.6.1"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -120,6 +121,13 @@ def check_pw(pw: str, stored: str) -> bool:
 
 def new_api_token() -> str:
     return secrets.token_urlsafe(24)  # 32 caracteres, mesmo formato do token Blynk
+
+
+def host_slug(name: str, uuid: str) -> str:
+    """Endereço local do ESP (<slug>.local). Mesma regra do firmware (mdnsName)."""
+    t = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode().lower()
+    t = re.sub(r"[^a-z0-9]+", "-", t).strip("-")[:32].strip("-")
+    return t or uuid.replace("_", "-")
 
 
 def new_pin() -> str:
@@ -277,6 +285,7 @@ class Hub:
                                "armed", "fw", "ip", "host", "rssi", "boot", "last_seen", "created_at",
                                "api_token", "open_value", "auto_update")}
         v["owner"] = d.get("owner")
+        v["host"] = host_slug(d["name"], d["uuid"])  # nome.local acompanha o nome do app
         c = self.conns.get(d["id"])
         v["online"] = c is not None
         v["online_since"] = c.since if c else None

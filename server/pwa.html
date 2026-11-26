@@ -205,7 +205,7 @@ async function cmd(d,a,btn){
 function localUrl(d){return`http://${d.host||d.uuid.replace(/_/g,"-")}.local/`}
 function ipUrl(d){return d.ip&&/^\d+\.\d+\.\d+\.\d+$/.test(d.ip)?`http://${d.ip}/`:null}
 function localLinks(d){const ip=ipUrl(d);return el("div",{class:"row wrap",style:"margin-top:8px"},
-  el("a",{href:localUrl(d),target:"_blank"},el("button",{class:"acc"},"Abrir pelo nome")),
+  el("a",{href:localUrl(d),target:"_blank"},el("button",{class:"acc"},"Abrir "+(d.host||d.uuid)+".local")),
   ip?el("a",{href:ip,target:"_blank"},el("button",{},"Abrir pelo IP "+d.ip)):null)}
 /* cache dos dispositivos para o modo sem internet */
 function saveOffline(){try{localStorage.setItem("vl_devs",JSON.stringify([...DEV.values()].map(d=>({id:d.id,name:d.name,uuid:d.uuid,host:d.host,ip:d.ip,pin:d.pin}))))}catch(e){}}
@@ -341,7 +341,8 @@ function settingsView(d){
     el("button",{type:"button",class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm(`Remover "${d.name}" do painel? Ele volta a aparecer se reconectar.`))return;try{await api("DELETE","/api/devices/"+d.id);closeSheet()}catch(e){toast(e.message)}}},"Remover dispositivo"));
   f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);
     const b={name:F.get("name"),release_ms:Math.round(+F.get("release_s")*1000),policy:F.get("policy"),grace_s:+F.get("grace_s"),egress_ok:F.get("egress_ok")==="on",pin:F.get("pin"),auto_update:F.get("auto_update")==="on"};
-    try{const r=await api("PATCH","/api/devices/"+d.id,b);toast(r.delivered?"Salvo e enviado ao dispositivo":"Salvo · aplica quando ele reconectar")}catch(err){toast(err.message)}};
+    try{const r=await api("PATCH","/api/devices/"+d.id,b);toast(r.delivered?"Salvo e enviado ao dispositivo":"Salvo · aplica quando ele reconectar")}
+    catch(err){toast(err instanceof TypeError?"Sem internet: os ajustes só salvam com conexão. No local, use o portal do dispositivo (botão 4 s · Configurações avançadas).":err.message)}};
   return f}
 
 function integrationView(d){

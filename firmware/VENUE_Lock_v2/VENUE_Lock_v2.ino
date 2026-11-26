@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.2"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.3"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -193,9 +193,45 @@ String htmlEsc(const char* s) {
   return o;
 }
 
+// Endereço local segue o NOME do app (ex.: "Geovani Casa" -> geovani-casa.local).
+// Mesma regra do servidor (host_slug): acentos viram letras simples, resto vira "-".
 String mdnsName() {
-  String h = cfg.uuid; h.replace('_', '-');
-  return h;
+  String out;
+  bool sep = false;
+  const uint8_t* b = (const uint8_t*)cfg.name;
+  size_t n = strlen(cfg.name);
+  auto push = [&](char c) { if (sep && out.length()) out += '-'; sep = false; out += c; };
+  for (size_t i = 0; i < n && out.length() < 32;) {
+    uint8_t c = b[i];
+    if (c < 0x80) {
+      if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z')) push((char)c);
+      else if (c >= 'A' && c <= 'Z') push((char)(c + 32));
+      else sep = true;
+      i++;
+      continue;
+    }
+    if (c == 0xC3 && i + 1 < n) {
+      uint8_t d = b[i + 1], o = d & 0x1F;
+      char m = 0;
+      if (d == 0xBF) m = 'y';
+      else if (o <= 5) m = 'a';
+      else if (o == 7) m = 'c';
+      else if (o >= 8 && o <= 11) m = 'e';
+      else if (o >= 12 && o <= 15) m = 'i';
+      else if (o == 17) m = 'n';
+      else if (o >= 18 && o <= 22) m = 'o';
+      else if (o >= 25 && o <= 28) m = 'u';
+      else if (o == 29) m = 'y';
+      if (m) push(m);
+      i += 2;
+      continue;
+    }
+    i++;  // outros caracteres: ignorados
+  }
+  if (out.length() > 32) out = out.substring(0, 32);
+  while (out.endsWith("-")) out.remove(out.length() - 1);
+  if (!out.length()) { out = cfg.uuid; out.replace('_', '-'); }
+  return out;
 }
 
 bool provisioned() {
@@ -339,7 +375,10 @@ void handleSigned(const char* p, const char* s) {
     uint32_t grace32 = d["grace"] | (uint32_t)cfg.graceS;
     uint16_t grace = grace32 > 65535 ? 65535 : grace32, rel = d["rel"] | cfg.releaseMs;
     uint8_t egress = (d["egress"] | 0) ? 1 : 0;
-    if (strcmp(name, cfg.name)) { strlcpy(cfg.name, name, sizeof(cfg.name)); changed = true; }
+    if (strcmp(name, cfg.name)) {
+      strlcpy(cfg.name, name, sizeof(cfg.name)); changed = true;
+      if (mdnsUp) { MDNS.close(); mdnsUp = false; }  // wifiTick anuncia o novo nome.local
+    }
     if (strcmp(pin, cfg.pin) && strlen(pin) >= 8) { strlcpy(cfg.pin, pin, sizeof(cfg.pin)); changed = true; }
     if (policy != cfg.policy || grace != cfg.graceS || rel != cfg.releaseMs || egress != cfg.egress) {
       cfg.policy = policy; cfg.graceS = max<uint16_t>(grace, 10);
@@ -907,7 +946,7 @@ void wifiTick() {
     if (mdnsUp) { MDNS.close(); mdnsUp = false; }
     if (!wifiDownSince) wifiDownSince = now ? now : 1;
     if (!apFallback && now - wifiDownSince > WIFI_AP_FALLBACK_MS && strlen(cfg.pin) >= 8) {
-      String ap = String("VENUE-") + cfg.uuid;
+      String ap = String("VENUE-") + mdnsName();
       WiFi.mode(WIFI_AP_STA);
       WiFi.softAP(ap.c_str(), cfg.pin);
       apFallback = true; apIdleSince = 0;
@@ -1055,7 +1094,7 @@ void loop() {
   web.handleClient();
   buttonTick();
 
-  if (pulseActive && now - pulseStart >= cfg.releaseMs) {
+  if (pulseActive && millis() - pulseStart >= cfg.releaseMs) {  // millis() atual: o comando pode ter chegado depois de 'now'
     pulseActive = false;
     applyRelay();
   }
