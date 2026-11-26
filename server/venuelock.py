@@ -38,7 +38,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.6.2"
+VERSION = "2.7.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -557,6 +557,23 @@ async def h_cmd(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def h_bulk(request: web.Request) -> web.Response:
+    """Comando geral: trancar/destrancar/liberar todas as portas do usuário de uma vez."""
+    u = current_user(request)
+    b = await body_json(request)
+    a = b.get("a")
+    if a not in ("lock", "unlock", "release"):
+        raise ValueError("a deve ser lock, unlock ou release")
+    devs = request.app[STORE].devices_for(u)
+    results = await asyncio.gather(*(send_cmd(request.app, d, a, f"app:{u['username']} (geral)") for d in devs))
+    out = [{"id": d["id"], "name": d["name"], "error": e} for d, e in zip(devs, results)]
+    ok = sum(1 for r in out if not r["error"])
+    LOG.warning("comando geral %s por %s: %d/%d ok", a, u["username"], ok, len(out))
+    return web.json_response({"ok": ok, "total": len(out),
+                              "offline": [r["name"] for r in out if r["error"] == "offline"],
+                              "failed": [r["name"] for r in out if r["error"] and r["error"] != "offline"]})
+
+
 async def h_regen_api_token(request: web.Request) -> web.Response:
     _, d = owned_device(request)
     st = request.app[STORE]
@@ -1049,6 +1066,7 @@ def build_app(store: Store, fwdir: str) -> web.Application:
     r.add_patch(r"/api/devices/{id:\d+}", h_device_patch)
     r.add_delete(r"/api/devices/{id:\d+}", h_device_delete)
     r.add_post(r"/api/devices/{id:\d+}/cmd", h_cmd)
+    r.add_post("/api/devices/bulk", h_bulk)
     r.add_get(r"/api/devices/{id:\d+}/events", h_events)
     r.add_get("/api/outages", h_outages)
     r.add_post(r"/api/devices/{id:\d+}/apitoken", h_regen_api_token)

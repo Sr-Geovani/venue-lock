@@ -202,6 +202,14 @@ async function cmd(d,a,btn){
   if(btn)btn.disabled=true;
   try{await api("POST",`/api/devices/${d.id}/cmd`,{a});toast(a==="release"?`Liberado por ${d.release_ms/1000} s`:a==="lock"?"Trancado":a==="unlock"?"Destrancado":"Comando enviado")}
   catch(e){toast(e.message)}finally{if(btn)btn.disabled=false}}
+async function bulk(a,btn){
+  const n=[...DEV.values()].length;
+  const msg={lock:`Trancar TODAS as ${n} portas?`,unlock:`DESTRANCAR TODAS as ${n} portas? Elas ficam abertas até alguém trancar.`,release:`Liberar TODAS as ${n} portas agora?`}[a];
+  if(!confirm(msg))return;btn.disabled=true;
+  try{const r=await api("POST","/api/devices/bulk",{a});
+    let t=`${{lock:"Trancadas",unlock:"Destrancadas",release:"Liberadas"}[a]}: ${r.ok} de ${r.total}`;
+    if(r.offline.length)t+=` · offline: ${r.offline.join(", ")}`;if(r.failed.length)t+=` · falhou: ${r.failed.join(", ")}`;toast(t)}
+  catch(e){toast(e.message)}finally{btn.disabled=false}}
 function localUrl(d){return`http://${d.host||d.uuid.replace(/_/g,"-")}.local/`}
 function ipUrl(d){return d.ip&&/^\d+\.\d+\.\d+\.\d+$/.test(d.ip)?`http://${d.ip}/`:null}
 function localLinks(d){const ip=ipUrl(d);return el("div",{class:"row wrap",style:"margin-top:8px"},
@@ -283,6 +291,8 @@ function render(){if(!ME)return;renderNav();
     const free=list.filter(d=>d.online&&d.free).length;
     $("#main").replaceChildren(
       el("div",{class:"stat"},el("div",{class:"card"},el("b",{},on),el("span",{},"online")),el("div",{class:"card"},el("b",{},list.length-on),el("span",{},"offline")),el("div",{class:"card"},el("b",{},free),el("span",{},"em queda"))),
+      list.length>1?el("div",{class:"card",style:"margin-bottom:12px"},el("div",{class:"row between wrap"},el("div",{},el("b",{},"Todas as portas"),el("div",{class:"small mut"},"Comando geral para os dispositivos online")),
+        el("div",{class:"row"},el("button",{class:"acc",disabled:!on,onclick:e=>bulk("lock",e.currentTarget)},"🔒 Trancar todas"),el("button",{class:"bad",disabled:!on,onclick:e=>bulk("unlock",e.currentTarget)},"Destrancar todas")))):null,
       list.length?el("div",{class:"grid"},list.map(homeCard)):el("div",{class:"card empty"},"Nenhum dispositivo ainda. Grave um ESP e ele aparece aqui sozinho."))}
   else if(TAB==="devs"){$("#hT").textContent="Dispositivos";$("#hS").textContent=`${on} de ${list.length} online`;
     $("#main").replaceChildren(
