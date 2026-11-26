@@ -26,7 +26,7 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 
-#define FW_VERSION      "2.3.0"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.3.1"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -40,9 +40,6 @@
 #define RELAY_ACTIVE_HIGH 1          // ESP-01S Relay padrão: 1. Só mude se o relé funcionar invertido.
 static_assert(sizeof(VL_ACCOUNT_SECRET) - 1 >= 20,
               "Cole o secret da conta em VL_ACCOUNT_SECRET (app VENUE -> Conta -> Secret do ESP)");
-constexpr bool cstrEq(const char* a, const char* b) { return *a == *b && (*a == 0 || cstrEq(a + 1, b + 1)); }
-static_assert(!cstrEq(VL_ADMIN_PASSWORD, "TROQUE_ESTA_SENHA") && sizeof(VL_ADMIN_PASSWORD) - 1 >= 8,
-              "Defina VL_ADMIN_PASSWORD (mínimo 8 caracteres): é a senha do portal de configuração do ESP");
 // =============================================================================
 #define RELAY_GPIO      0
 #define BUTTON_GPIO     2        // botão para GND (INPUT_PULLUP). Não pressionar no boot.
@@ -86,6 +83,12 @@ struct Ev { uint32_t at; char k[14]; char src[8]; char d[24]; };
 static const uint8_t EVQ = 24;
 Ev evq[EVQ];
 uint8_t evHead = 0, evLen = 0;
+
+// Checagem em tempo de compilação (fica depois dos structs: o Arduino IDE gera os
+// protótipos das funções antes da primeira função do arquivo)
+constexpr bool cstrEq(const char* a, const char* b) { return *a == *b && (*a == 0 || cstrEq(a + 1, b + 1)); }
+static_assert(!cstrEq(VL_ADMIN_PASSWORD, "TROQUE_ESTA_SENHA") && sizeof(VL_ADMIN_PASSWORD) - 1 >= 8,
+              "Defina VL_ADMIN_PASSWORD (mínimo 8 caracteres): é a senha do portal de configuração do ESP");
 
 ESP8266WebServer web(80);
 DNSServer dns;
@@ -627,8 +630,7 @@ void setupWeb() {
   web.on("/l/nonce", HTTP_GET, []() { if (portalMode) web.send(403); else handleNonce(); });
   web.on("/l/cmd", HTTP_POST, []() { if (portalMode) web.send(403); else handleLocalCmd(); });
   web.onNotFound(routeNotFound);
-  static const char* headerKeys[] = {"Cookie"};
-  web.collectHeaders(headerKeys, 1);
+  web.collectHeaders("Cookie");  // core ESP8266 3.x: lista variádica
   web.begin();
 }
 
