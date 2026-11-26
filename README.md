@@ -26,11 +26,12 @@ Atualizar depois: `cd /opt/venue-lock && git pull && ./install.sh lock.venuemark
 2. Gerenciador de placas: **esp8266** ≥ 3.1. Bibliotecas: **WebSockets** (Markus Sattler) ≥ 2.4.1, **ArduinoJson** 7.x.
 3. Placa **Generic ESP8266 Module**, Flash Size **1MB (FS:none OTA:~502KB)**, Erase Flash **All Flash Contents**.
 4. Abra `firmware/VENUE_Lock_v2/VENUE_Lock_v2.ino` e, no bloco **CONFIGURAÇÃO FIXA** do topo,
-   troque `COLE_O_SECRET_AQUI` pelo secret do app (Conta → Secret do ESP). Servidor, usuário e
-   polaridade do relé já vêm preenchidos. **Nunca envie o `.ino` com o secret para o GitHub.**
+   troque `COLE_O_SECRET_AQUI` pelo secret do app (Conta → Secret do ESP) e `TROQUE_ESTA_SENHA`
+   pela senha de administrador do portal (mínimo 8 caracteres). Servidor, usuário e
+   polaridade do relé já vêm preenchidos. Sem essas duas trocas o Arduino IDE não compila. **Nunca envie o `.ino` com o secret para o GitHub.**
 5. Grave com o adaptador USB do ESP-01 (modo PROG).
-6. Ligue no módulo: ele abre o Wi-Fi `VENUE_Lock-xxxxxx`. O instalador só preenche **Wi-Fi**,
-   **senha** e **nome do ponto**. O ESP aparece sozinho no app.
+6. Ligue no módulo: ele abre o Wi-Fi `VENUE_Lock-xxxxxx`. Abrir a configuração exige a
+   **senha de administrador**; depois só aparecem **Wi-Fi**, **senha** e **nome do ponto**. O ESP aparece sozinho no app.
 
 O secret fica gravado no firmware: não use "Gerar novo secret" no app sem necessidade,
 porque todos os ESPs precisariam ser regravados por USB. O `.bin` publicado para atualização

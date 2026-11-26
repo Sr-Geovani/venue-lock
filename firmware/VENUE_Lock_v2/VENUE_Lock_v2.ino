@@ -26,7 +26,7 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 
-#define FW_VERSION      "2.2.0"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.3.0"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -36,9 +36,13 @@
 #define VL_SERVER_PORT    443
 #define VL_ACCOUNT_USER   "venue"
 #define VL_ACCOUNT_SECRET "COLE_O_SECRET_AQUI"
+#define VL_ADMIN_PASSWORD "TROQUE_ESTA_SENHA"   // senha para abrir a configuração no ESP (mín. 8)
 #define RELAY_ACTIVE_HIGH 1          // ESP-01S Relay padrão: 1. Só mude se o relé funcionar invertido.
 static_assert(sizeof(VL_ACCOUNT_SECRET) - 1 >= 20,
               "Cole o secret da conta em VL_ACCOUNT_SECRET (app VENUE -> Conta -> Secret do ESP)");
+constexpr bool cstrEq(const char* a, const char* b) { return *a == *b && (*a == 0 || cstrEq(a + 1, b + 1)); }
+static_assert(!cstrEq(VL_ADMIN_PASSWORD, "TROQUE_ESTA_SENHA") && sizeof(VL_ADMIN_PASSWORD) - 1 >= 8,
+              "Defina VL_ADMIN_PASSWORD (mínimo 8 caracteres): é a senha do portal de configuração do ESP");
 // =============================================================================
 #define RELAY_GPIO      0
 #define BUTTON_GPIO     2        // botão para GND (INPUT_PULLUP). Não pressionar no boot.
@@ -50,6 +54,7 @@ static const uint32_t WIFI_AP_FALLBACK_MS= 60000;       // roteador fora > 60 s 
 static const uint32_t AP_IDLE_CLOSE_MS   = 30000;       // AP fecha 30 s após Wi-Fi voltar e sem clientes
 static const uint32_t PORTAL_IDLE_MS     = 300000;      // portal de configuração: 5 min sem uso
 static const uint32_t NONCE_TTL_MS       = 30000;
+static const uint32_t PORTAL_SESSION_MS  = 600000;      // login do portal vale 10 min sem uso
 static const uint8_t  LOCAL_MAX_FAILS    = 5;
 static const uint32_t LOCAL_LOCKOUT_MS   = 60000;
 static const uint32_t PING_MS            = 60000;
@@ -103,6 +108,9 @@ uint32_t wifiDownSince = 0, apIdleSince = 0;
 bool mdnsUp = false;
 uint32_t restartAt = 0;
 String scanOptions;
+char portalSession[33] = "";
+uint32_t portalSessionAt = 0, portalLockUntil = 0;
+uint8_t portalFails = 0;
 bool otaPending = false;
 String otaPath, otaMd5, otaVer;
 
@@ -133,6 +141,14 @@ String hmacHex(const uint8_t* key, size_t klen, const String& msg) {
   hmacSha256(key, klen, msg.c_str(), msg.length(), mac);
   toHex(mac, 32, hex);
   return String(hex);
+}
+
+// Comparação exata em tempo constante (senhas)
+bool ctEqualExact(const String& a, const String& b) {
+  size_t n = max(a.length(), b.length());
+  uint8_t r = a.length() != b.length();
+  for (size_t i = 0; i < n; i++) r |= (uint8_t)(i < a.length() ? a[i] : 0) ^ (uint8_t)(i < b.length() ? b[i] : 0);
+  return r == 0;
 }
 
 bool ctEqual(const String& a, const String& b) {
@@ -476,8 +492,51 @@ void handleLocalCmd() {
 }
 
 // ------------------------------------------------------------------ portal de configuração
+// ------------------------------------------------------------------ login do portal
+bool portalAuthed() {
+  if (!portalSession[0] || millis() - portalSessionAt > PORTAL_SESSION_MS) { portalSession[0] = 0; return false; }
+  String c = web.header("Cookie");
+  int i = c.indexOf("vls=");
+  if (i < 0 || !ctEqualExact(c.substring(i + 4, i + 36), String(portalSession))) return false;
+  portalSessionAt = millis();
+  return true;
+}
+
+void sendLoginPage(const char* msg) {
+  String h = F("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+               "<title>VENUE Lock</title><style>body{background:#0b0e13;color:#e9edf3;font:16px system-ui;padding:16px}"
+               "input,button{width:100%;box-sizing:border-box;padding:12px;margin:4px 0 10px;border:0;border-radius:10px;background:#1e2430;color:#e9edf3;font:inherit}"
+               "button{background:#1d3a35;color:#4fd1b5;font-weight:700}label{color:#8b94a5;font-size:14px}.e{color:#f06a6a}</style></head><body>"
+               "<h2 style='color:#4fd1b5'>VENUE Lock</h2><p style='color:#8b94a5'>Configuração protegida</p>"
+               "<form method=post action=/login><label>Senha de administrador</label>"
+               "<input name=p type=password autocomplete=current-password required autofocus><button>Entrar</button></form><p class=e>");
+  h += msg;
+  h += F("</p></body></html>");
+  sendNoCache();
+  web.send(200, F("text/html"), h);
+}
+
+void handleLogin() {
+  portalActivity = millis();
+  if (portalLockUntil && (int32_t)(millis() - portalLockUntil) < 0) return sendLoginPage("Muitas tentativas. Aguarde 1 minuto.");
+  portalLockUntil = 0;
+  if (!ctEqualExact(web.arg("p"), String(VL_ADMIN_PASSWORD))) {
+    if (++portalFails >= LOCAL_MAX_FAILS) { portalFails = 0; portalLockUntil = millis() + LOCAL_LOCKOUT_MS; logEvent("portal_bloq", "local"); }
+    LOGF("[portal] senha incorreta");
+    return sendLoginPage("Senha incorreta.");
+  }
+  portalFails = 0;
+  randomHex(portalSession);
+  portalSessionAt = millis();
+  logEvent("portal_login", "local");
+  web.sendHeader(F("Set-Cookie"), String("vls=") + portalSession + "; Path=/; HttpOnly; Max-Age=600");
+  web.sendHeader(F("Location"), F("/"));
+  web.send(303, F("text/plain"), "");
+}
+
 void handlePortal() {
   portalActivity = millis();
+  if (!portalAuthed()) return sendLoginPage("");
   String h = F("<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
                "<title>VENUE Lock - Configurar</title><style>body{background:#0b0e13;color:#e9edf3;font:16px system-ui;padding:16px}"
                "input,button{width:100%;box-sizing:border-box;padding:12px;margin:4px 0 10px;border:0;border-radius:10px;background:#1e2430;color:#e9edf3;font:inherit}"
@@ -500,6 +559,7 @@ void handlePortal() {
 
 void handleSave() {
   portalActivity = millis();
+  if (!portalAuthed()) { web.send(403, F("text/plain"), F("Sessao expirada. Volte e entre com a senha.")); return; }
   if (web.hasArg("factory")) {
     cfgDefaults(); cfgSave();
     web.send(200, F("text/plain"), F("Reset de fabrica feito. Reiniciando."));
@@ -562,10 +622,13 @@ void routeNotFound() {
 
 void setupWeb() {
   web.on("/", HTTP_GET, routeRoot);
+  web.on("/login", HTTP_POST, []() { if (portalMode) handleLogin(); else web.send(403, F("text/plain"), F("403")); });
   web.on("/save", HTTP_POST, []() { if (portalMode) handleSave(); else web.send(403, F("text/plain"), F("403")); });
   web.on("/l/nonce", HTTP_GET, []() { if (portalMode) web.send(403); else handleNonce(); });
   web.on("/l/cmd", HTTP_POST, []() { if (portalMode) web.send(403); else handleLocalCmd(); });
   web.onNotFound(routeNotFound);
+  static const char* headerKeys[] = {"Cookie"};
+  web.collectHeaders(headerKeys, 1);
   web.begin();
 }
 
