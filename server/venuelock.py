@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.4.0"
+VERSION = "2.5.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -721,21 +721,68 @@ async def h_device_ota(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+# Categorias do log (filtro do app)
+EVENT_CATS = {
+    "acesso": ("release", "lock", "unlock", "ignorado"),
+    "conexao": ("online", "offline", "srv_off", "queda_libera", "queda_fim", "ap_emerg", "boot"),
+}
+
+
+def period_args(request: web.Request) -> tuple[float, float, float | None, int]:
+    """from/to (epoch, calculados no fuso do celular), before (cursor) e limit."""
+    def num(name: str, default: float | None) -> float | None:
+        v = request.query.get(name)
+        if v in (None, ""):
+            return default
+        try:
+            return float(v)
+        except ValueError:
+            raise ValueError(f"{name} inválido") from None
+    lim = max(1, min(200, int(num("limit", 50))))
+    return num("from", 0.0), num("to", 4102444800.0), num("before", None), lim
+
+
 async def h_events(request: web.Request) -> web.Response:
     _, d = owned_device(request)
-    lim = max(1, min(500, int(request.query.get("limit", "100"))))
-    return web.json_response({"events": request.app[STORE].q(
-        "SELECT ts, kind, source, detail FROM events WHERE device_id=? ORDER BY ts DESC LIMIT ?", (d["id"], lim))})
+    t_from, t_to, before, lim = period_args(request)
+    sql = "SELECT ts, kind, source, detail FROM events WHERE device_id=? AND ts>=? AND ts<?"
+    p: list[Any] = [d["id"], t_from, t_to]
+    if before is not None:
+        sql += " AND ts<?"
+        p.append(before)
+    cat = request.query.get("cat", "")
+    if cat in EVENT_CATS:
+        sql += f" AND kind IN ({','.join('?' * len(EVENT_CATS[cat]))})"
+        p += EVENT_CATS[cat]
+    elif cat == "sistema":
+        kinds = EVENT_CATS["acesso"] + EVENT_CATS["conexao"]
+        sql += f" AND kind NOT IN ({','.join('?' * len(kinds))})"
+        p += kinds
+    sql += " AND source != 'esp:app' ORDER BY ts DESC LIMIT ?"  # 'esp:app' = eco do ESP de um comando já registrado
+    p.append(lim + 1)
+    rows = request.app[STORE].q(sql, tuple(p))
+    return web.json_response({"events": rows[:lim], "has_more": len(rows) > lim})
 
 
 async def h_outages(request: web.Request) -> web.Response:
     u = current_user(request)
-    lim = max(1, min(500, int(request.query.get("limit", "100"))))
-    where, p = ("", ()) if u["is_admin"] else ("WHERE d.user_id=?", (u["id"],))
-    rows = request.app[STORE].q(
-        f"SELECT o.device_id, d.name, o.started, o.ended, o.reason FROM outages o JOIN devices d ON d.id=o.device_id "
-        f"{where} ORDER BY o.started DESC LIMIT ?", (*p, lim))
-    return web.json_response({"outages": rows})
+    t_from, t_to, before, lim = period_args(request)
+    sql = ("SELECT o.device_id, d.name, o.started, o.ended, o.reason FROM outages o JOIN devices d ON d.id=o.device_id "
+           "WHERE o.started>=? AND o.started<?")
+    p: list[Any] = [t_from, t_to]
+    if not u["is_admin"]:
+        sql += " AND d.user_id=?"
+        p.append(u["id"])
+    if request.query.get("device", "").isdigit():
+        sql += " AND o.device_id=?"
+        p.append(int(request.query["device"]))
+    if before is not None:
+        sql += " AND o.started<?"
+        p.append(before)
+    sql += " ORDER BY o.started DESC LIMIT ?"
+    p.append(lim + 1)
+    rows = request.app[STORE].q(sql, tuple(p))
+    return web.json_response({"outages": rows[:lim], "has_more": len(rows) > lim})
 
 
 # ----------------------------------------------------------------------------- ESP websocket
@@ -751,6 +798,8 @@ async def handle_esp_msg(app: web.Application, c: DevConn, m: dict) -> None:
         st.update_device(c.did, armed=1 if m.get("armed") else 0, last_seen=time.time())
         await hub.push(st, c.did)
     elif t == "ev":
+        if m.get("src") == "app":
+            return  # o servidor já registrou esse comando (evita linha duplicada no log)
         ago = max(0, min(int(m.get("ago", 0)), 30 * 86400 * 1000))
         st.event(c.did, str(m.get("k", "?"))[:24], f"esp:{str(m.get('src', '?'))[:16]}",
                  str(m.get("d", ""))[:120] or None, ts=time.time() - ago / 1000)
@@ -882,8 +931,12 @@ async def ws_ui(request: web.Request) -> web.WebSocketResponse:
 
 
 # ----------------------------------------------------------------------------- static / app
+PWA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pwa.html")
+
+
 async def h_index(_: web.Request) -> web.Response:
-    return web.Response(text=PWA_HTML, content_type="text/html", headers={"Cache-Control": "no-cache"})
+    with open(PWA_PATH, encoding="utf-8") as f:
+        return web.Response(text=f.read(), content_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
 async def h_manifest(_: web.Request) -> web.Response:
@@ -958,133 +1011,6 @@ def build_app(store: Store, fwdir: str) -> web.Application:
         r.add_route("GET", f"/external/api/{path}", handler)
         r.add_route("POST", f"/external/api/{path}", handler)
     return app
-
-
-# ----------------------------------------------------------------------------- PWA
-PWA_HTML = r"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0b0e13"><link rel="manifest" href="/manifest.json"><link rel="apple-touch-icon" href="/icon.svg">
-<title>VENUE LOCK</title><style>
-:root{--bg:#0b0e13;--s1:#151a22;--s2:#1e2430;--fg:#e9edf3;--mut:#8b94a5;--acc:#4fd1b5;--warn:#f5b942;--bad:#f06a6a;--ok:#46d483}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}html,body{margin:0;background:var(--bg);color:var(--fg);font:16px -apple-system,system-ui,sans-serif}
-header{padding:calc(env(safe-area-inset-top) + 18px) 18px 14px}h1{margin:0;font-size:28px}.sub{color:var(--mut);font-size:14px;margin-top:4px}
-main{padding:0 14px calc(90px + env(safe-area-inset-bottom))}.card{background:var(--s1);border-radius:18px;padding:16px;margin:12px 0}
-.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.sp{justify-content:space-between}.mut{color:var(--mut);font-size:14px}
-.pill{font-size:13px;padding:4px 10px;border-radius:99px;background:var(--s2)}.p-on{color:var(--ok)}.p-off{color:var(--bad)}.p-warn{color:var(--warn)}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.cell{background:var(--s2);border-radius:12px;padding:10px}.cell b{display:block;margin-top:3px;font-weight:600}
-button,input,select{font:inherit;color:var(--fg);background:var(--s2);border:0;border-radius:14px;padding:12px 14px}
-button{cursor:pointer;font-weight:600}button:disabled{opacity:.35}.btn-acc{background:#1d3a35;color:var(--acc)}.btn-bad{background:#3a1f22;color:var(--bad)}.full{width:100%}
-.big{font-size:18px;padding:16px}input,select{width:100%}label{display:block;margin:10px 0 4px;color:var(--mut);font-size:13px}
-nav{position:fixed;left:0;right:0;bottom:0;display:flex;background:var(--s1);padding:8px 8px calc(8px + env(safe-area-inset-bottom))}
-nav button{flex:1;background:none;color:var(--mut);font-size:14px}nav button.on{background:#1d2b2b;color:var(--acc)}
-#toast{position:fixed;left:16px;right:16px;bottom:calc(90px + env(safe-area-inset-bottom));background:#000e;padding:12px 16px;border-radius:12px;display:none;z-index:9}
-dialog{background:var(--s1);color:var(--fg);border:0;border-radius:18px;width:calc(100% - 24px);max-width:520px;max-height:85vh}
-dialog::backdrop{background:#000a}table{width:100%;border-collapse:collapse;font-size:13px}td{padding:6px 4px;border-bottom:1px solid var(--s2);vertical-align:top}
-.banner{border-radius:14px;padding:12px 14px;margin:10px 0;font-size:14px}.b-warn{background:#2a2413;color:var(--warn)}.b-bad{background:#2e1719;color:var(--bad)}
-code{word-break:break-all;font-size:13px}.hidden{display:none!important}
-</style></head><body>
-<section id="vLogin" class="hidden"><div style="max-width:420px;margin:22vh auto 0;padding:0 18px;text-align:center">
-<h1 style="color:var(--acc);font-size:38px">VENUE LOCK</h1><p class="mut">Entre para controlar seus dispositivos</p>
-<form id="fLogin" class="card" style="text-align:left"><label>Usuário</label><input id="lu" autocomplete="username" autocapitalize="none" required>
-<label>Senha</label><input id="lp" type="password" autocomplete="current-password" required>
-<button class="btn-acc full big" style="margin-top:16px">Entrar</button></form></div></section>
-<section id="vApp" class="hidden"><header><div class="row sp"><div><h1 id="hT"></h1><div class="sub" id="hS"></div></div><span id="live" class="pill p-off">offline</span></div></header>
-<main id="main"></main>
-<nav><button data-tab="home" class="on">Início</button><button data-tab="devs">Dispositivos</button><button data-tab="acct">Conta</button></nav></section>
-<dialog id="dlg"><div id="dlgB"></div><form method="dialog" style="margin-top:12px"><button class="full">Fechar</button></form></dialog>
-<div id="toast"></div>
-<script>
-const $=s=>document.querySelector(s);let TOK="";try{TOK=localStorage.getItem("vl_tok")||""}catch(e){}
-let ME=null,TAB="home",ws=null,wsT=null;const DEV=new Map();
-function el(t,a={},...k){const n=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x.startsWith("on"))n.addEventListener(x.slice(2),v);else if(x==="class")n.className=v;else if(v!==false&&v!=null)n.setAttribute(x,v===true?"":v)}for(const c of k.flat())if(c!=null&&c!==false)n.append(c);return n}
-function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",4000)}
-function ago(ts){if(!ts)return"nunca";const s=Math.max(0,Date.now()/1000-ts);if(s<60)return"agora";if(s<3600)return Math.floor(s/60)+" min";if(s<86400)return Math.floor(s/3600)+" h";return Math.floor(s/86400)+" d"}
-function dt(ts){return ts?new Date(ts*1000).toLocaleString("pt-BR"):"—"}
-function dur(s){s=Math.round(s);if(s<60)return s+"s";if(s<3600)return Math.floor(s/60)+"min "+(s%60)+"s";return Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"min"}
-async function api(m,p,b){const r=await fetch(p,{method:m,headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/json"},body:b===undefined?undefined:JSON.stringify(b)});const d=await r.json().catch(()=>({}));if(r.status===401&&p!=="/api/login"){logout();throw new Error("Sessão expirada")}if(!r.ok)throw new Error(d.error||("HTTP "+r.status));return d}
-function stateOf(d){if(!d.online)return["Offline","p-off"];if(d.free)return["Livre (queda)","p-warn"];if(d.relay)return["Trancado","p-on"];return d.armed?["Liberando","p-warn"]:["Destrancado","p-warn"]}
-async function cmd(d,a,btn){if(a==="unlock"&&!confirm(`Deixar "${d.name}" destrancado até novo comando?`))return;if(a==="reboot"&&!confirm(`Reiniciar "${d.name}"?`))return;
- if(btn){btn.disabled=true}try{await api("POST",`/api/devices/${d.id}/cmd`,{a});toast(a==="release"?`Liberado por ${d.release_ms/1000}s`:"Comando confirmado")}catch(e){toast(e.message)}finally{if(btn)btn.disabled=false}}
-function localUrl(d){return`http://${d.host||d.uuid.replace(/_/g,"-")}.local/`}
-function homeCard(d){const[s,c]=stateOf(d);const rb=el("button",{class:"btn-acc full big",disabled:!d.online,onclick:e=>cmd(d,"release",e.currentTarget)},"Liberar porta");
- return el("div",{class:"card"},el("div",{class:"row sp"},el("strong",{style:"font-size:18px"},d.name),el("span",{class:"pill "+c},s)),
-  el("div",{class:"grid2"},el("div",{class:"cell mut"},"IP",el("b",{},d.ip||"—")),el("div",{class:"cell mut"},"Último sinal",el("b",{},d.online?"online":ago(d.last_seen))),
-   el("div",{class:"cell mut"},"Modo",el("b",{},d.armed?"Trancado":"Destrancado")),el("div",{class:"cell mut"},"Queda de internet",el("b",{},d.policy==="hold"?"Mantém":"Libera em "+d.grace_s+"s"))),
-  el("div",{style:"margin-top:12px"},rb),
-  d.online?null:el("a",{href:localUrl(d),target:"_blank",style:"display:block;margin-top:10px;color:var(--acc);text-align:center"},"Sem internet? Acesso local na mesma rede Wi-Fi"))}
-function devCard(d){const[s,c]=stateOf(d);
- return el("div",{class:"card"},el("div",{class:"row sp"},el("div",{},el("strong",{},d.name),el("div",{class:"mut"},d.uuid+(ME.is_admin&&d.owner?" · "+d.owner:""))),el("span",{class:"pill "+c},s)),
-  el("div",{class:"mut",style:"margin-top:8px"},`${d.ip||"sem IP"} · fw ${d.fw||"?"} · ${d.rssi?d.rssi+" dBm":"—"} · ${d.online?"online há "+ago(d.online_since):"visto "+ago(d.last_seen)}`),
-  d.egress_ok?null:el("div",{class:"banner b-warn"},"Saída livre por hardware não confirmada: na queda de internet a porta é liberada."),
-  el("div",{class:"row",style:"margin-top:10px"},
-   el("button",{class:"btn-acc",disabled:!d.online,onclick:e=>cmd(d,"release",e.currentTarget)},"Liberar"),
-   el("button",{disabled:!d.online,onclick:e=>cmd(d,d.armed?"unlock":"lock",e.currentTarget)},d.armed?"Destrancar":"Trancar"),
-   el("button",{onclick:()=>settings(d)},"Ajustes"),el("button",{onclick:()=>events(d)},"Log")))}
-function copy(t){navigator.clipboard.writeText(t).then(()=>toast("Copiado"),()=>toast("Falha ao copiar"))}
-function settings(d){const ver=`${location.origin}/external/api/get?token=${d.api_token}&d0`,act=`${location.origin}/external/api/update?token=${d.api_token}`;const f=el("form",{},el("h3",{},"Ajustes — "+d.name),
-  el("label",{},"Nome"),el("input",{name:"name",value:d.name,maxlength:32}),
-  el("label",{},"Tempo de liberação (ms)"),el("input",{name:"release_ms",type:"number",min:1000,max:60000,value:d.release_ms}),
-  el("label",{},"Na queda de internet"),el("select",{name:"policy"},el("option",{value:"release",selected:d.policy==="release"},"Liberar a porta após o tempo abaixo"),el("option",{value:"hold",selected:d.policy==="hold"},"Manter trancado (comando local continua)")),
-  el("label",{},"Tempo sem servidor antes de aplicar (s)"),el("input",{name:"grace_s",type:"number",min:10,max:65535,value:d.grace_s}),
-  el("label",{class:"row"},el("input",{name:"egress_ok",type:"checkbox",checked:!!d.egress_ok,style:"width:auto"}),"Botão de saída e emergência instalados direto na alimentação da fechadura"),
-  el("label",{},"PIN local (8-16, também é a senha do Wi-Fi de emergência do ESP)"),el("input",{name:"pin",value:d.pin,autocomplete:"off"}),
-  el("div",{class:"cell",style:"margin-top:14px"},el("strong",{},"Integração com o sistema"),el("div",{class:"mut"},"Cole no ponto do sistema, tipo de loja Blink"),
-   el("label",{},"Host Verificação"),el("code",{},ver),el("button",{type:"button",style:"margin-top:6px",onclick:()=>copy(ver)},"Copiar"),
-   el("label",{},"Host Ativação"),el("code",{},act),el("button",{type:"button",style:"margin-top:6px",onclick:()=>copy(act)},"Copiar"),
-   el("label",{},"Valor que libera a porta"),el("select",{name:"open_value"},el("option",{value:"1",selected:d.open_value==="1"},"1"),el("option",{value:"0",selected:d.open_value==="0"},"0")),
-   el("button",{type:"button",class:"btn-bad",style:"margin-top:10px",onclick:async()=>{if(!confirm("Gerar novo token? As URLs antigas param de funcionar no sistema."))return;try{await api("POST",`/api/devices/${d.id}/apitoken`);$("#dlg").close();toast("Novo token gerado: atualize as URLs no sistema")}catch(e){toast(e.message)}}},"Gerar novo token")),
-  el("label",{class:"row"},el("input",{name:"auto_update",type:"checkbox",checked:!!d.auto_update,style:"width:auto"}),"Atualizar firmware automaticamente"),
-  el("button",{class:"btn-acc full",style:"margin-top:14px"},"Salvar"),
-  el("div",{class:"row",style:"margin-top:10px"},el("button",{type:"button",disabled:!d.online,onclick:()=>cmd(d,"reboot")},"Reiniciar ESP"),
-   el("button",{type:"button",disabled:!d.online,onclick:async()=>{try{await api("POST",`/api/devices/${d.id}/ota`);toast("Atualização enviada; o ESP reinicia sozinho")}catch(e){toast(e.message)}}},"Atualizar firmware"),
-   el("a",{href:localUrl(d),target:"_blank",class:"mut"},"Abrir acesso local"),
-   el("button",{type:"button",class:"btn-bad",onclick:async()=>{if(!confirm(`Remover "${d.name}"? Ele volta a aparecer se reconectar com o secret.`))return;try{await api("DELETE","/api/devices/"+d.id);$("#dlg").close()}catch(e){toast(e.message)}}},"Remover")));
- f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const b={name:F.get("name"),release_ms:+F.get("release_ms"),policy:F.get("policy"),grace_s:+F.get("grace_s"),egress_ok:F.get("egress_ok")==="on",pin:F.get("pin"),open_value:F.get("open_value"),auto_update:F.get("auto_update")==="on"};
-  try{const r=await api("PATCH","/api/devices/"+d.id,b);toast(r.delivered?"Salvo e enviado ao ESP":"Salvo; aplica quando o ESP reconectar");$("#dlg").close()}catch(err){toast(err.message)}};
- showDlg(f)}
-async function events(d){try{const r=await api("GET",`/api/devices/${d.id}/events?limit=150`);
- showDlg(el("div",{},el("h3",{},"Log — "+d.name),r.events.length?el("table",{},r.events.map(e=>el("tr",{},el("td",{},dt(e.ts)),el("td",{},el("b",{},e.kind),el("div",{class:"mut"},e.source+(e.detail?" · "+e.detail:"")))))):el("p",{class:"mut"},"Sem eventos")))}catch(e){toast(e.message)}}
-async function outages(){try{const r=await api("GET","/api/outages?limit=150");
- showDlg(el("div",{},el("h3",{},"Quedas"),r.outages.length?el("table",{},r.outages.map(o=>el("tr",{},el("td",{},el("b",{},o.name),el("div",{class:"mut"},dt(o.started))),el("td",{},o.ended?dur(o.ended-o.started):el("span",{class:"p-off"},"em andamento"))))):el("p",{class:"mut"},"Nenhuma queda registrada")))}catch(e){toast(e.message)}}
-function showDlg(n){$("#dlgB").replaceChildren(n);$("#dlg").showModal()}
-function acct(){const masked=ME.secret.slice(0,4)+"…"+ME.secret.slice(-4);
- const pw=el("form",{class:"card"},el("strong",{},"Alterar senha"),el("label",{},"Senha atual"),el("input",{name:"old",type:"password",required:true}),el("label",{},"Nova senha"),el("input",{name:"new",type:"password",minlength:6,required:true}),el("button",{class:"btn-acc full",style:"margin-top:12px"},"Salvar senha"));
- pw.onsubmit=async e=>{e.preventDefault();const F=new FormData(pw);try{await api("POST","/api/me/password",{old:F.get("old"),new:F.get("new")});pw.reset();toast("Senha alterada")}catch(err){toast(err.message)}};
- const out=[el("div",{class:"card"},el("strong",{},"Seu perfil"),el("div",{class:"grid2"},el("div",{class:"cell mut"},"Usuário",el("b",{},ME.username)),el("div",{class:"cell mut"},"Tipo",el("b",{},ME.is_admin?"Administrador":"Usuário comum")))),pw,
-  el("div",{class:"card"},el("strong",{},"Secret do ESP"),el("p",{class:"mut"},"Configure no portal do ESP junto com o usuário. Com ele, o ESP se cadastra sozinho na sua conta."),el("code",{},masked),
-   el("div",{class:"row",style:"margin-top:10px"},el("button",{onclick:()=>navigator.clipboard.writeText(ME.secret).then(()=>toast("Secret copiado"),()=>toast("Falha ao copiar"))},"Copiar"),
-    el("button",{class:"btn-bad",onclick:async()=>{if(!confirm("Gerar novo secret? TODOS os ESPs desta conta param de conectar e precisam ser regravados por USB com o secret novo. Só faça isso se o secret vazou."))return;try{ME.secret=(await api("POST","/api/me/secret")).secret;render();toast("Novo secret gerado")}catch(e){toast(e.message)}}},"Gerar novo"))),
-  el("div",{class:"card"},el("strong",{},"Conexão"),el("div",{class:"banner "+(ws&&ws.readyState===1?"":"b-warn")},ws&&ws.readyState===1?"Tempo real ativo":"Sem conexão em tempo real — reconectando"))];
- if(ME.is_admin){const nu=el("form",{class:"card"},el("strong",{},"Criar usuário"),el("label",{},"Usuário"),el("input",{name:"u",autocapitalize:"none",required:true}),el("label",{},"Senha"),el("input",{name:"p",type:"password",minlength:6,required:true}),
-   el("label",{class:"row"},el("input",{name:"a",type:"checkbox",style:"width:auto"}),"Administrador"),el("button",{class:"btn-acc full",style:"margin-top:12px"},"Criar"));
-  nu.onsubmit=async e=>{e.preventDefault();const F=new FormData(nu);try{await api("POST","/api/users",{username:F.get("u"),password:F.get("p"),is_admin:F.get("a")==="on"});nu.reset();toast("Usuário criado")}catch(err){toast(err.message)}};out.push(nu)}
- if(ME.is_admin)out.push(fwCard());
- out.push(el("button",{class:"btn-bad full big",onclick:logout},"Sair da conta"));return out}
-function fwCard(){const info=el("div",{class:"mut"},"Carregando…"),inp=el("input",{type:"file",accept:".bin"});
- api("GET","/api/firmware").then(r=>{const p=r.firmware.find(x=>x.published);info.textContent=p?`Publicado: v${p.version} (${Math.round(p.size/1024)} KB, ${dt(p.created_at)})`:"Nenhum firmware publicado"}).catch(e=>info.textContent=e.message);
- const b=el("button",{class:"btn-acc full",style:"margin-top:10px",onclick:async()=>{const f=inp.files[0];if(!f)return toast("Escolha o arquivo .bin");if(!confirm(`Publicar ${f.name}? Todos os ESPs com atualização automática vão atualizar.`))return;b.disabled=true;
-  try{const r=await fetch("/api/firmware",{method:"POST",headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/octet-stream"},body:f});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("HTTP "+r.status));toast(`v${d.version} publicado; enviado para ${d.sent} ESP(s) online`);render()}catch(e){toast(e.message)}finally{b.disabled=false}}},"Publicar firmware");
- return el("div",{class:"card"},el("strong",{},"Firmware dos ESPs"),info,el("p",{class:"mut"},"Arduino IDE: Sketch → Exportar binário compilado. Envie o .bin gerado."),inp,b)}
-function render(){if(!ME)return;const list=[...DEV.values()].sort((a,b)=>a.name.localeCompare(b.name));const on=list.filter(d=>d.online).length;
- document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.tab===TAB));
- if(TAB==="home"){$("#hT").textContent="Início";$("#hS").textContent=`${list.length} dispositivo(s) · ${on} online`;$("#main").replaceChildren(...(list.length?list.map(homeCard):[el("p",{class:"mut card"},"Nenhum dispositivo ainda. Configure um ESP com seu usuário e secret (aba Conta).")]))}
- else if(TAB==="devs"){$("#hT").textContent="Dispositivos";$("#hS").textContent=`${on} online · ${new Date().toLocaleTimeString("pt-BR")}`;
-  $("#main").replaceChildren(el("div",{class:"row",style:"margin-top:4px"},el("button",{class:"btn-acc",style:"flex:1",onclick:outages},"Quedas"),el("button",{onclick:load},"Atualizar")),...list.map(devCard))}
- else{$("#hT").textContent="Conta";$("#hS").textContent="Perfil e conexão com o servidor";$("#main").replaceChildren(...acct())}}
-function setLive(on){const l=$("#live");l.className="pill "+(on?"p-on":"p-off");l.textContent=on?"ao vivo":"offline";if(TAB==="acct")render()}
-function connectWS(){clearTimeout(wsT);if(ws){ws.onclose=null;ws.close()}ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws/ui?s=${encodeURIComponent(TOK)}`);
- ws.onopen=()=>setLive(true);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="snapshot"){DEV.clear();m.devices.forEach(d=>DEV.set(d.id,d))}else if(m.type==="device")DEV.set(m.device.id,m.device);else if(m.type==="removed")DEV.delete(m.id);if(TAB!=="acct")render()};
- ws.onclose=()=>{setLive(false);if(TOK)wsT=setTimeout(connectWS,3000)}}
-async function load(){const r=await api("GET","/api/devices");DEV.clear();r.devices.forEach(d=>DEV.set(d.id,d));render()}
-async function start(){if(!TOK){$("#vLogin").classList.remove("hidden");$("#vApp").classList.add("hidden");return}
- try{ME=await api("GET","/api/me");$("#vLogin").classList.add("hidden");$("#vApp").classList.remove("hidden");await load();connectWS()}catch(e){toast(e.message)}}
-function logout(){if(TOK)fetch("/api/logout",{method:"POST",headers:{"Authorization":"Bearer "+TOK}}).catch(()=>{});TOK="";ME=null;try{localStorage.removeItem("vl_tok")}catch(e){}if(ws){ws.onclose=null;ws.close();ws=null}clearTimeout(wsT);DEV.clear();start()}
-$("#fLogin").onsubmit=async e=>{e.preventDefault();try{TOK=(await api("POST","/api/login",{username:$("#lu").value.trim().toLowerCase(),password:$("#lp").value})).token;try{localStorage.setItem("vl_tok",TOK)}catch(err){}$("#lp").value="";start()}catch(err){toast(err.message)}};
-document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{TAB=b.dataset.tab;render()});
-document.addEventListener("visibilitychange",()=>{if(!document.hidden&&TOK&&(!ws||ws.readyState>1))connectWS()});
-setInterval(()=>{if(TAB!=="acct")render()},30000);start();
-</script></body></html>"""
 
 
 # ----------------------------------------------------------------------------- CLI

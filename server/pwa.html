@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0e13">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon.svg">
+<title>VENUE LOCK</title>
+<style>
+:root{
+  --bg:#0b0e13;--s1:#141922;--s2:#1b212c;--s3:#242b38;--bd:#262d3a;
+  --fg:#e9edf3;--mut:#8b94a5;--acc:#4fd1b5;--acc-bg:#16332e;
+  --ok:#46d483;--ok-bg:#14301f;--warn:#f5b942;--warn-bg:#2d2512;--bad:#f06a6a;--bad-bg:#331a1c;--info:#6aa8f0;--info-bg:#17243a;
+  --r:16px;--safe-b:env(safe-area-inset-bottom);--safe-t:env(safe-area-inset-top);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer;border:0;border-radius:12px;padding:11px 14px;background:var(--s3);font-weight:600;transition:filter .15s,transform .05s}
+button:active{transform:scale(.98)}button:disabled{opacity:.35;cursor:default}
+button.acc{background:var(--acc-bg);color:var(--acc)}button.bad{background:var(--bad-bg);color:var(--bad)}
+button.ghost{background:transparent;color:var(--mut)}button.full{width:100%}button.big{padding:15px;font-size:17px}
+input,select{width:100%;background:var(--s2);border:1px solid var(--bd);border-radius:12px;padding:11px 12px;outline:none}
+input:focus,select:focus{border-color:var(--acc)}
+label.f{display:block;margin:12px 0 5px;color:var(--mut);font-size:13px}
+.check{display:flex;gap:10px;align-items:flex-start;margin-top:12px;color:var(--fg);font-size:14px}.check input{width:auto;margin-top:3px;accent-color:var(--acc)}
+.mut{color:var(--mut)}.small{font-size:13px}.hidden{display:none!important}
+.row{display:flex;gap:8px;align-items:center}.between{justify-content:space-between}.wrap{flex-wrap:wrap}.grow{flex:1}
+
+/* layout */
+.top{position:sticky;top:0;z-index:5;background:var(--bg);
+  padding:calc(var(--safe-t) + 14px) 16px 12px;border-bottom:1px solid var(--bd)}
+.top-in{max-width:1100px;margin:0 auto;display:flex;align-items:center;gap:12px}
+.top h1{font-size:22px;margin:0;letter-spacing:-.01em}.top .sub{font-size:13px;color:var(--mut)}
+main{max-width:1100px;margin:0 auto;padding:14px 16px calc(96px + var(--safe-b))}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr))}
+.card{background:var(--s1);border:1px solid var(--bd);border-radius:var(--r);padding:16px}
+.section-title{font-size:13px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:22px 4px 8px}
+
+nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--s1);border-top:1px solid var(--bd);
+  display:flex;justify-content:center;gap:6px;padding:8px 10px calc(8px + var(--safe-b))}
+nav.tabs button{flex:1;max-width:180px;background:transparent;color:var(--mut);display:flex;flex-direction:column;align-items:center;gap:2px;font-size:12px;padding:8px}
+nav.tabs button svg{width:22px;height:22px}
+nav.tabs button.on{background:var(--acc-bg);color:var(--acc)}
+@media(min-width:900px){
+  nav.tabs{position:sticky;top:0;bottom:auto;border:0;background:transparent;padding:0;justify-content:flex-end}
+  nav.tabs button{flex:0 0 auto;flex-direction:row;font-size:14px;gap:8px;padding:9px 14px}
+  nav.tabs button svg{width:18px;height:18px}
+  main{padding-bottom:40px}
+}
+
+/* status */
+.pill{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:4px 10px;border-radius:99px;background:var(--s3);white-space:nowrap}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.p-ok{color:var(--ok);background:var(--ok-bg)}.p-bad{color:var(--bad);background:var(--bad-bg)}.p-warn{color:var(--warn);background:var(--warn-bg)}.p-info{color:var(--info);background:var(--info-bg)}
+
+/* device card */
+.dev-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
+.dev-name{font-size:17px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.meta{display:flex;flex-wrap:wrap;gap:6px 14px;margin:10px 0 14px;font-size:13px;color:var(--mut)}
+.meta b{color:var(--fg);font-weight:600}
+.actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
+.actions button{font-size:13px;padding:10px 6px}
+.banner{border-radius:12px;padding:10px 12px;font-size:13px;margin-top:10px}
+.b-warn{background:var(--warn-bg);color:var(--warn)}.b-info{background:var(--info-bg);color:var(--info)}
+
+/* list rows */
+.list .item{display:flex;align-items:center;gap:12px;padding:14px;border-bottom:1px solid var(--bd);cursor:pointer}
+.list .item:last-child{border-bottom:0}.list{padding:0;overflow:hidden}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}.d-ok{background:var(--ok);box-shadow:0 0 0 4px var(--ok-bg)}.d-bad{background:var(--bad);box-shadow:0 0 0 4px var(--bad-bg)}.d-warn{background:var(--warn);box-shadow:0 0 0 4px var(--warn-bg)}
+.chev{color:var(--mut);font-size:20px}
+.stat{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
+.stat .card{padding:10px 12px}.stat b{display:block;font-size:22px;line-height:1.2}.stat span{font-size:12px;color:var(--mut);white-space:nowrap}
+
+/* sheet (modal) */
+dialog.sheet{padding:0;border:0;background:var(--s1);color:var(--fg);width:100%;max-width:640px;height:100%;max-height:100%;margin:0 auto;border-radius:0}
+@media(min-width:700px){dialog.sheet{height:auto;max-height:88vh;margin:6vh auto;border-radius:20px;border:1px solid var(--bd)}}
+dialog.sheet::backdrop{background:rgba(0,0,0,.6)}
+.sheet-wrap{display:flex;flex-direction:column;height:100%;max-height:inherit}
+.sheet-head{position:sticky;top:0;background:var(--s1);border-bottom:1px solid var(--bd);padding:calc(var(--safe-t) + 12px) 16px 10px;z-index:2}
+@media(min-width:700px){.sheet-head{padding-top:14px}}
+.sheet-head h2{margin:0;font-size:18px}.close{width:36px;height:36px;padding:0;border-radius:50%;font-size:20px;line-height:1;flex:none}
+.sheet-body{overflow-y:auto;padding:14px 16px calc(20px + var(--safe-b));-webkit-overflow-scrolling:touch;flex:1}
+.seg{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;margin-top:10px}.seg::-webkit-scrollbar{display:none}
+.seg button{flex:none;padding:7px 13px;font-size:13px;border-radius:99px;background:var(--s2);color:var(--mut);border:1px solid var(--bd)}
+.seg button.on{background:var(--acc-bg);color:var(--acc);border-color:transparent}
+.seg.tabs2 button{border-radius:10px}
+
+/* log */
+.day{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin:16px 2px 6px}
+.day:first-child{margin-top:2px}
+.ev{display:flex;gap:12px;padding:10px 2px;border-bottom:1px solid var(--bd)}
+.ev:last-child{border-bottom:0}
+.ic{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;font-size:16px}
+.ic.ok{background:var(--ok-bg);color:var(--ok)}.ic.bad{background:var(--bad-bg);color:var(--bad)}.ic.warn{background:var(--warn-bg);color:var(--warn)}.ic.info{background:var(--info-bg);color:var(--info)}.ic.mut{background:var(--s3);color:var(--mut)}
+.ev .t{font-weight:600}.ev .d{font-size:13px;color:var(--mut);word-break:break-word}.ev .h{margin-left:auto;font-size:12px;color:var(--mut);white-space:nowrap;padding-left:8px}
+.empty{text-align:center;color:var(--mut);padding:40px 10px}
+.spin{display:inline-block;width:16px;height:16px;border:2px solid var(--s3);border-top-color:var(--acc);border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-3px}
+@keyframes sp{to{transform:rotate(360deg)}}
+code{font-size:12px;word-break:break-all;color:var(--mut);background:var(--s2);border:1px solid var(--bd);border-radius:10px;padding:8px 10px;display:block;margin-top:4px}
+
+#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + var(--safe-b));z-index:50;background:#000e;border:1px solid var(--bd);
+  padding:11px 16px;border-radius:12px;max-width:min(92vw,480px);display:none;font-size:14px}
+@media(min-width:900px){#toast{bottom:24px}}
+
+/* login */
+.login{max-width:400px;margin:18vh auto 0;padding:0 18px;text-align:center}
+.login h1{color:var(--acc);font-size:36px;letter-spacing:.02em;margin:0}
+</style>
+</head>
+<body>
+
+<section id="vLogin" class="hidden">
+  <div class="login">
+    <h1>VENUE LOCK</h1><p class="mut">Entre para controlar seus dispositivos</p>
+    <form id="fLogin" class="card" style="text-align:left">
+      <label class="f">Usuário</label><input id="lu" autocomplete="username" autocapitalize="none" required>
+      <label class="f">Senha</label><input id="lp" type="password" autocomplete="current-password" required>
+      <button class="acc full big" style="margin-top:16px">Entrar</button>
+    </form>
+  </div>
+</section>
+
+<section id="vApp" class="hidden">
+  <header class="top"><div class="top-in">
+    <div class="grow"><h1 id="hT">Início</h1><div class="sub" id="hS"></div></div>
+    <span id="live" class="pill p-bad">offline</span>
+    <nav class="tabs" id="nav"></nav>
+  </div></header>
+  <main id="main"></main>
+</section>
+
+<dialog class="sheet" id="sheet"><div class="sheet-wrap">
+  <div class="sheet-head">
+    <div class="row between"><div class="grow" style="min-width:0"><h2 id="shT"></h2><div class="small mut" id="shS"></div></div>
+      <button class="close" aria-label="Fechar" onclick="closeSheet()">✕</button></div>
+    <div id="shTabs"></div>
+  </div>
+  <div class="sheet-body" id="shB"></div>
+</div></dialog>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+let TOK="";try{TOK=localStorage.getItem("vl_tok")||""}catch(e){}
+let ME=null,TAB="home",ws=null,wsT=null,SHEET=null;
+const DEV=new Map();
+
+/* ---------- helpers ---------- */
+function el(t,a={},...k){const n=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x.startsWith("on"))n.addEventListener(x.slice(2),v);else if(x==="class")n.className=v;else if(x==="html")n.innerHTML=v;else if(v!==false&&v!=null)n.setAttribute(x,v===true?"":v)}for(const c of k.flat())if(c!=null&&c!==false)n.append(c);return n}
+function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",3800)}
+const pad=n=>String(n).padStart(2,"0");
+function hm(ts){const d=new Date(ts*1000);return pad(d.getHours())+":"+pad(d.getMinutes())}
+function hms(ts){const d=new Date(ts*1000);return hm(ts)+":"+pad(d.getSeconds())}
+function dayKey(ts){const d=new Date(ts*1000);return d.getFullYear()+"-"+d.getMonth()+"-"+d.getDate()}
+function dayLabel(ts){const d=new Date(ts*1000),t=new Date();const y=new Date();y.setDate(t.getDate()-1);
+  if(dayKey(ts)===dayKey(t/1000))return"Hoje";if(dayKey(ts)===dayKey(y/1000))return"Ontem";
+  return d.toLocaleDateString("pt-BR",{weekday:"short",day:"2-digit",month:"2-digit",year:d.getFullYear()!==t.getFullYear()?"numeric":undefined})}
+function ago(ts){if(!ts)return"nunca";const s=Math.max(0,Date.now()/1000-ts);if(s<60)return"agora";if(s<3600)return Math.floor(s/60)+" min";if(s<86400)return Math.floor(s/3600)+" h";return Math.floor(s/86400)+" d"}
+function dur(s){s=Math.round(s);if(s<60)return s+" s";if(s<3600)return Math.floor(s/60)+" min "+(s%60)+" s";if(s<86400)return Math.floor(s/3600)+" h "+Math.floor(s%3600/60)+" min";return Math.floor(s/86400)+" d "+Math.floor(s%86400/3600)+" h"}
+async function api(m,p,b){const r=await fetch(p,{method:m,headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/json"},body:b===undefined?undefined:JSON.stringify(b)});
+  const d=await r.json().catch(()=>({}));if(r.status===401&&p!=="/api/login"){logout();throw new Error("Sessão expirada")}if(!r.ok)throw new Error(d.error||("Erro "+r.status));return d}
+function copy(t){navigator.clipboard.writeText(t).then(()=>toast("Copiado"),()=>toast("Não foi possível copiar"))}
+
+/* períodos (calculados no fuso do celular) */
+const PERIODS=[["hoje","Hoje"],["ontem","Ontem"],["7d","7 dias"],["30d","30 dias"],["tudo","Tudo"]];
+function range(p){const s=new Date();s.setHours(0,0,0,0);const day=s.getTime()/1000;
+  if(p==="hoje")return{from:day};if(p==="ontem")return{from:day-86400,to:day};if(p==="7d")return{from:day-6*86400};if(p==="30d")return{from:day-29*86400};return{}}
+function qs(o){return Object.entries(o).filter(([,v])=>v!==undefined&&v!==null&&v!=="").map(([k,v])=>k+"="+encodeURIComponent(v)).join("&")}
+
+/* tradução dos eventos */
+const SRC={"sistema":"Sistema","servidor":"Servidor","painel":"Painel","esp":"Dispositivo","esp:botao":"Botão físico","esp:local":"Acesso local (Wi-Fi)","esp:ap":"Wi-Fi de emergência","esp:esp":"Dispositivo","esp:portal":"Portal do dispositivo"};
+function srcName(s){if(!s)return"";if(s.startsWith("app:"))return"App · "+s.slice(4);return SRC[s]||s}
+const EV={
+  release:["Porta liberada","🔓","ok"],lock:["Trancado","🔒","info"],unlock:["Destrancado (fica aberto)","🔓","warn"],
+  ignorado:["Comando do sistema ignorado","⤫","warn"],online:["Conectou","●","ok"],offline:["Desconectou","○","bad"],
+  srv_off:["Perdeu o servidor","○","bad"],queda_libera:["Liberou por queda de internet","⚠","warn"],queda_fim:["Internet voltou","●","ok"],
+  ap_emerg:["Wi-Fi de emergência aberto","📶","warn"],boot:["Dispositivo ligou","⏻","mut"],registrado:["Cadastrado","＋","info"],
+  config:["Ajustes alterados","⚙","mut"],config_local:["Ajustes feitos no dispositivo","⚙","mut"],token_api:["Token de integração trocado","🔑","warn"],
+  ota_enviado:["Atualização enviada","⇣","info"],ota_ok:["Firmware atualizado","✓","ok"],ota_falha:["Falha na atualização","!","bad"],
+  reboot:["Reinício solicitado","↻","mut"],portal:["Portal de configuração aberto","⚙","warn"],portal_login:["Login no portal do dispositivo","🔑","mut"],
+  portal_bloq:["Portal bloqueado (senha errada)","!","bad"],pin_bloq:["Acesso local bloqueado (PIN errado)","!","bad"],wifi_config:["Wi-Fi alterado","📶","info"],created:["Cadastrado","＋","info"]};
+function evInfo(e){const b=EV[e.kind]||[e.kind,"•","mut"];let tone=b[2],detail=e.detail||"";
+  if(/^recusado|sem confirmação|falha/i.test(detail)){tone="bad"}
+  if(detail==="ok")detail="";
+  detail=detail.replace(/^ok \[(.*)\]$/,"$1").replace(/code=1006/,"conexão caiu").replace(/code=1000/,"encerrada").replace(/^ip [^ ]+ /,"");
+  if(e.kind==="config"){try{const o=JSON.parse(detail);detail=Object.keys(o).map(k=>({name:"nome",egress_ok:"saída livre",auto_update:"atualização automática",open_value:"valor que libera",policy:"queda",grace_s:"tempo de queda",release_ms:"tempo de liberação",policy_hold:"queda"}[k]||k)).join(", ")}catch(x){}}
+  return{title:b[0],icon:b[1],tone,detail:[srcName(e.source),detail].filter(Boolean).join(" · ")}}
+function stateOf(d){if(!d.online)return["Offline","p-bad","d-bad"];if(d.free)return["Livre · queda","p-warn","d-warn"];if(d.relay)return["Trancado","p-ok","d-ok"];return d.armed?["Liberando","p-info","d-warn"]:["Destrancado","p-warn","d-warn"]}
+function signal(r){if(!r)return"—";return r>-60?"Ótimo":r>-70?"Bom":r>-80?"Fraco":"Ruim"}
+
+/* ---------- ações ---------- */
+async function cmd(d,a,btn){
+  if(a==="unlock"&&!confirm(`Deixar "${d.name}" destrancado até alguém trancar?`))return;
+  if(a==="reboot"&&!confirm(`Reiniciar "${d.name}"?`))return;
+  if(btn)btn.disabled=true;
+  try{await api("POST",`/api/devices/${d.id}/cmd`,{a});toast(a==="release"?`Liberado por ${d.release_ms/1000} s`:a==="lock"?"Trancado":a==="unlock"?"Destrancado":"Comando enviado")}
+  catch(e){toast(e.message)}finally{if(btn)btn.disabled=false}}
+function localUrl(d){return`http://${d.host||d.uuid.replace(/_/g,"-")}.local/`}
+
+/* ---------- telas ---------- */
+const ICONS={home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>',
+  devs:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+  acct:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>'};
+function renderNav(){const n=$("#nav");n.replaceChildren(...[["home","Início"],["devs","Dispositivos"],["acct","Conta"]].map(([k,l])=>
+  el("button",{class:TAB===k?"on":"",onclick:()=>{TAB=k;render();window.scrollTo(0,0)}},el("span",{html:ICONS[k]}),l)))}
+
+function homeCard(d){const[s,pc]=stateOf(d);
+  return el("div",{class:"card"},
+    el("div",{class:"dev-head"},el("div",{style:"min-width:0"},el("div",{class:"dev-name"},d.name),el("div",{class:"small mut"},d.uuid)),el("span",{class:"pill "+pc},s)),
+    el("div",{class:"meta"},
+      el("span",{},"Sinal ",el("b",{},signal(d.rssi))),
+      el("span",{},d.online?"Online há ":"Visto há ",el("b",{},ago(d.online?d.online_since:d.last_seen))),
+      el("span",{},"Liberação ",el("b",{},(d.release_ms/1000)+" s"))),
+    el("button",{class:"acc full big",disabled:!d.online,onclick:e=>cmd(d,"release",e.currentTarget)},"Liberar porta"),
+    el("div",{class:"actions"},
+      el("button",{disabled:!d.online,onclick:e=>cmd(d,d.armed?"unlock":"lock",e.currentTarget)},d.armed?"Destrancar":"Trancar"),
+      el("button",{onclick:()=>openDevice(d.id,"log")},"Registros"),
+      el("button",{onclick:()=>openDevice(d.id,"ajustes")},"Ajustes")),
+    d.online?null:el("div",{class:"banner b-info"},"Sem internet no local? Na mesma rede Wi-Fi use ",el("a",{href:localUrl(d),target:"_blank",style:"color:inherit;font-weight:600"},"o acesso local")," com o PIN."))}
+
+function devRow(d){const[s,,dc]=stateOf(d);
+  return el("div",{class:"item",onclick:()=>openDevice(d.id,"log")},el("span",{class:"dot "+dc}),
+    el("div",{class:"grow",style:"min-width:0"},el("div",{style:"font-weight:600"},d.name),
+      el("div",{class:"small mut"},`${s} · ${d.online?"online há "+ago(d.online_since):"visto há "+ago(d.last_seen)} · fw ${d.fw||"?"}`)),
+    d.egress_ok?null:el("span",{class:"pill p-warn",title:"Saída livre por hardware não confirmada"},"saída"),
+    el("span",{class:"chev"},"›"))}
+
+function acct(){
+  const masked=ME.secret.slice(0,4)+"…"+ME.secret.slice(-4);
+  const pw=el("form",{class:"card"},el("b",{},"Alterar senha"),el("label",{class:"f"},"Senha atual"),el("input",{name:"old",type:"password",required:true}),
+    el("label",{class:"f"},"Nova senha"),el("input",{name:"new",type:"password",minlength:6,required:true}),el("button",{class:"acc full",style:"margin-top:12px"},"Salvar senha"));
+  pw.onsubmit=async e=>{e.preventDefault();const F=new FormData(pw);try{await api("POST","/api/me/password",{old:F.get("old"),new:F.get("new")});pw.reset();toast("Senha alterada")}catch(err){toast(err.message)}};
+  const out=[
+    el("div",{class:"section-title"},"Perfil"),
+    el("div",{class:"card row between"},el("div",{},el("b",{},ME.username),el("div",{class:"small mut"},ME.is_admin?"Administrador":"Usuário")),
+      el("span",{class:"pill "+(ws&&ws.readyState===1?"p-ok":"p-warn")},ws&&ws.readyState===1?"tempo real":"reconectando")),
+    pw,
+    el("div",{class:"section-title"},"Dispositivos"),
+    el("div",{class:"card"},el("b",{},"Secret do ESP"),el("p",{class:"small mut"},"Fica gravado no firmware. Trocar exige regravar todos os ESPs por USB."),
+      el("code",{},masked),el("div",{class:"row",style:"margin-top:10px"},
+        el("button",{onclick:()=>copy(ME.secret)},"Copiar"),
+        el("button",{class:"bad",onclick:async()=>{if(!confirm("Gerar novo secret? TODOS os ESPs param de conectar até serem regravados por USB. Só faça isso se o secret vazou."))return;try{ME.secret=(await api("POST","/api/me/secret")).secret;render();toast("Novo secret gerado")}catch(e){toast(e.message)}}},"Gerar novo")))];
+  if(ME.is_admin){out.push(fwCard());
+    const nu=el("form",{class:"card"},el("b",{},"Criar usuário"),el("label",{class:"f"},"Usuário"),el("input",{name:"u",autocapitalize:"none",required:true}),
+      el("label",{class:"f"},"Senha"),el("input",{name:"p",type:"password",minlength:6,required:true}),
+      el("label",{class:"check"},el("input",{name:"a",type:"checkbox"}),"Administrador"),el("button",{class:"acc full",style:"margin-top:12px"},"Criar"));
+    nu.onsubmit=async e=>{e.preventDefault();const F=new FormData(nu);try{await api("POST","/api/users",{username:F.get("u"),password:F.get("p"),is_admin:F.get("a")==="on"});nu.reset();toast("Usuário criado")}catch(err){toast(err.message)}};
+    out.push(nu)}
+  out.push(el("button",{class:"bad full big",style:"margin-top:18px",onclick:logout},"Sair da conta"));
+  return out}
+
+function fwCard(){const info=el("div",{class:"small mut"},el("span",{class:"spin"})),inp=el("input",{type:"file",accept:".bin",style:"margin-top:10px"});
+  api("GET","/api/firmware").then(r=>{const p=r.firmware.find(x=>x.published);info.textContent=p?`Publicado: v${p.version} · ${Math.round(p.size/1024)} KB · ${new Date(p.created_at*1000).toLocaleString("pt-BR")}`:"Nenhum firmware publicado"}).catch(e=>info.textContent=e.message);
+  const b=el("button",{class:"acc full",style:"margin-top:10px",onclick:async()=>{const f=inp.files[0];if(!f)return toast("Escolha o arquivo .bin");if(!confirm(`Publicar ${f.name}? Os ESPs com atualização automática vão instalar.`))return;b.disabled=true;
+    try{const r=await fetch("/api/firmware",{method:"POST",headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/octet-stream"},body:f});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("Erro "+r.status));toast(`v${d.version} publicado · enviado para ${d.sent} ESP(s)`);render()}catch(e){toast(e.message)}finally{b.disabled=false}}},"Publicar .bin manualmente");
+  return el("div",{class:"card"},el("b",{},"Firmware dos ESPs"),info,el("p",{class:"small mut"},"Normalmente a VPS compila e publica sozinha (git pull + install.sh). Use abaixo só para enviar um .bin do Arduino IDE."),inp,b)}
+
+function render(){if(!ME)return;renderNav();
+  const list=[...DEV.values()].sort((a,b)=>a.name.localeCompare(b.name,"pt-BR"));const on=list.filter(d=>d.online).length;
+  if(TAB==="home"){$("#hT").textContent="Início";$("#hS").textContent=`${on} de ${list.length} online`;
+    const free=list.filter(d=>d.online&&d.free).length;
+    $("#main").replaceChildren(
+      el("div",{class:"stat"},el("div",{class:"card"},el("b",{},on),el("span",{},"online")),el("div",{class:"card"},el("b",{},list.length-on),el("span",{},"offline")),el("div",{class:"card"},el("b",{},free),el("span",{},"em queda"))),
+      list.length?el("div",{class:"grid"},list.map(homeCard)):el("div",{class:"card empty"},"Nenhum dispositivo ainda. Grave um ESP e ele aparece aqui sozinho."))}
+  else if(TAB==="devs"){$("#hT").textContent="Dispositivos";$("#hS").textContent=`${on} de ${list.length} online`;
+    $("#main").replaceChildren(
+      el("div",{class:"row wrap",style:"margin-bottom:12px"},el("button",{class:"acc",onclick:()=>openOutages()},"Quedas"),el("button",{onclick:load},"Atualizar")),
+      list.length?el("div",{class:"card list"},list.map(devRow)):el("div",{class:"card empty"},"Nenhum dispositivo."))}
+  else{$("#hT").textContent="Conta";$("#hS").textContent="Perfil, firmware e usuários";$("#main").replaceChildren(...acct())}}
+
+/* ---------- sheet ---------- */
+function openSheet(title,sub,tabs,body){$("#shT").textContent=title;$("#shS").textContent=sub||"";$("#shTabs").replaceChildren(...(tabs?[tabs]:[]));$("#shB").replaceChildren(body);$("#shB").scrollTop=0;const s=$("#sheet");if(!s.open)s.showModal()}
+function closeSheet(){$("#sheet").close();SHEET=null}
+$("#sheet").addEventListener("click",e=>{if(e.target.id==="sheet")closeSheet()});
+$("#sheet").addEventListener("close",()=>{SHEET=null});
+function chips(opts,cur,onPick,cls=""){return el("div",{class:"seg "+cls},opts.map(([k,l])=>el("button",{class:k===cur?"on":"",onclick:()=>onPick(k)},l)))}
+
+function openDevice(id,tab){const d=DEV.get(id);if(!d)return;SHEET={type:"dev",id,tab,period:SHEET&&SHEET.period||"hoje",cat:SHEET&&SHEET.cat||""};drawDevice()}
+function drawDevice(){const d=DEV.get(SHEET.id);if(!d)return closeSheet();const[s]=stateOf(d);
+  const tabs=chips([["log","Registros"],["ajustes","Ajustes"],["integracao","Integração"]],SHEET.tab,k=>{SHEET.tab=k;drawDevice()},"tabs2");
+  const body=SHEET.tab==="log"?logView(d):SHEET.tab==="ajustes"?settingsView(d):integrationView(d);
+  openSheet(d.name,`${s} · ${d.uuid}`,tabs,body)}
+
+function logView(d){
+  const box=el("div",{}),list=el("div",{}),more=el("button",{class:"full hidden",style:"margin-top:12px"},"Carregar mais");
+  box.append(chips(PERIODS,SHEET.period,k=>{SHEET.period=k;drawDevice()}),chips([["","Tudo"],["acesso","Acessos"],["conexao","Conexão"],["sistema","Sistema"]],SHEET.cat,k=>{SHEET.cat=k;drawDevice()}),
+    el("div",{style:"margin-top:14px"},list),more);
+  let before=null,lastDay=null;
+  async function page(){more.disabled=true;if(before===null)list.replaceChildren(el("div",{class:"empty"},el("span",{class:"spin"})));
+    try{const r=await api("GET",`/api/devices/${d.id}/events?`+qs({...range(SHEET.period),cat:SHEET.cat,before,limit:50}));
+      if(before===null)list.replaceChildren();
+      if(!r.events.length&&before===null)list.append(el("div",{class:"empty"},"Nenhum registro neste período."));
+      for(const e of r.events){const k=dayKey(e.ts);if(k!==lastDay){list.append(el("div",{class:"day"},dayLabel(e.ts)));lastDay=k}
+        const i=evInfo(e);list.append(el("div",{class:"ev"},el("div",{class:"ic "+i.tone},i.icon),el("div",{style:"min-width:0"},el("div",{class:"t"},i.title),i.detail?el("div",{class:"d"},i.detail):null),el("div",{class:"h"},hms(e.ts))))}
+      if(r.events.length)before=r.events[r.events.length-1].ts;
+      more.classList.toggle("hidden",!r.has_more)}
+    catch(e){list.replaceChildren(el("div",{class:"empty"},e.message))}finally{more.disabled=false}}
+  more.onclick=page;page();return box}
+
+function settingsView(d){
+  const f=el("form",{},
+    el("div",{class:"section-title",style:"margin-top:4px"},"Geral"),
+    el("label",{class:"f"},"Nome"),el("input",{name:"name",value:d.name,maxlength:32}),
+    el("label",{class:"f"},"Tempo de liberação (segundos)"),el("input",{name:"release_s",type:"number",min:1,max:60,step:"0.5",value:d.release_ms/1000}),
+    el("div",{class:"section-title"},"Queda de internet"),
+    el("label",{class:"f"},"O que fazer"),el("select",{name:"policy"},el("option",{value:"release",selected:d.policy==="release"},"Liberar a porta"),el("option",{value:"hold",selected:d.policy==="hold"},"Manter trancado (comando local continua)")),
+    el("label",{class:"f"},"Depois de quanto tempo sem servidor (segundos)"),el("input",{name:"grace_s",type:"number",min:10,max:65535,value:d.grace_s}),
+    el("label",{class:"check"},el("input",{name:"egress_ok",type:"checkbox",checked:!!d.egress_ok}),el("span",{},"Botão de saída e quebra-vidro instalados direto na alimentação da fechadura ",el("span",{class:"mut"},"(obrigatório para manter trancado)"))),
+    el("div",{class:"section-title"},"Acesso local e atualização"),
+    el("label",{class:"f"},"PIN local (8 a 16 letras/números · também é a senha do Wi-Fi de emergência)"),el("input",{name:"pin",value:d.pin,autocomplete:"off"}),
+    el("label",{class:"check"},el("input",{name:"auto_update",type:"checkbox",checked:!!d.auto_update}),"Atualizar firmware automaticamente"),
+    el("button",{class:"acc full big",style:"margin-top:16px"},"Salvar ajustes"),
+    el("div",{class:"section-title"},"Manutenção"),
+    el("div",{class:"actions"},
+      el("button",{type:"button",disabled:!d.online,onclick:e=>cmd(d,"reboot",e.currentTarget)},"Reiniciar"),
+      el("button",{type:"button",disabled:!d.online,onclick:async()=>{try{await api("POST",`/api/devices/${d.id}/ota`);toast("Atualização enviada")}catch(e){toast(e.message)}}},"Atualizar fw"),
+      el("button",{type:"button",onclick:()=>window.open(localUrl(d),"_blank")},"Acesso local")),
+    el("div",{class:"small mut",style:"margin-top:10px"},`Firmware ${d.fw||"?"} · IP ${d.ip||"—"} · sinal ${d.rssi?d.rssi+" dBm":"—"}`),
+    el("button",{type:"button",class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm(`Remover "${d.name}" do painel? Ele volta a aparecer se reconectar.`))return;try{await api("DELETE","/api/devices/"+d.id);closeSheet()}catch(e){toast(e.message)}}},"Remover dispositivo"));
+  f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);
+    const b={name:F.get("name"),release_ms:Math.round(+F.get("release_s")*1000),policy:F.get("policy"),grace_s:+F.get("grace_s"),egress_ok:F.get("egress_ok")==="on",pin:F.get("pin"),auto_update:F.get("auto_update")==="on"};
+    try{const r=await api("PATCH","/api/devices/"+d.id,b);toast(r.delivered?"Salvo e enviado ao dispositivo":"Salvo · aplica quando ele reconectar")}catch(err){toast(err.message)}};
+  return f}
+
+function integrationView(d){
+  const ver=`${location.origin}/external/api/get?token=${d.api_token}&d0`,act=`${location.origin}/external/api/update?token=${d.api_token}`;
+  const sel=el("select",{},el("option",{value:"1",selected:d.open_value==="1"},"1"),el("option",{value:"0",selected:d.open_value==="0"},"0"));
+  sel.onchange=async()=>{try{await api("PATCH","/api/devices/"+d.id,{open_value:sel.value});toast("Salvo")}catch(e){toast(e.message)}};
+  return el("div",{},
+    el("p",{class:"small mut",style:"margin-top:0"},"No sistema.venuemarket.com.br, no ponto deste dispositivo, use Tipo de Loja Blink e cole as duas URLs."),
+    el("label",{class:"f"},"Host Verificação"),el("code",{},ver),el("button",{style:"margin-top:6px",onclick:()=>copy(ver)},"Copiar"),
+    el("label",{class:"f"},"Host Ativação"),el("code",{},act),el("button",{style:"margin-top:6px",onclick:()=>copy(act)},"Copiar"),
+    el("label",{class:"f"},"Valor que libera a porta"),sel,
+    el("div",{class:"banner b-info"},"Se os registros mostrarem \"Comando do sistema ignorado\", troque o valor acima."),
+    el("button",{class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm("Gerar novo token? As URLs antigas param de funcionar no sistema."))return;try{await api("POST",`/api/devices/${d.id}/apitoken`);toast("Novo token: atualize as URLs no sistema")}catch(e){toast(e.message)}}},"Gerar novo token"))}
+
+function openOutages(){SHEET={type:"out",period:"7d"};drawOutages()}
+function drawOutages(){const box=el("div",{}),list=el("div",{}),more=el("button",{class:"full hidden",style:"margin-top:12px"},"Carregar mais");
+  box.append(el("div",{style:"margin-top:14px"},list),more);
+  let before=null,lastDay=null;
+  async function page(){more.disabled=true;if(before===null)list.replaceChildren(el("div",{class:"empty"},el("span",{class:"spin"})));
+    try{const r=await api("GET","/api/outages?"+qs({...range(SHEET.period),before,limit:50}));if(before===null)list.replaceChildren();
+      if(!r.outages.length&&before===null)list.append(el("div",{class:"empty"},"Nenhuma queda neste período. 👍"));
+      for(const o of r.outages){const k=dayKey(o.started);if(k!==lastDay){list.append(el("div",{class:"day"},dayLabel(o.started)));lastDay=k}
+        list.append(el("div",{class:"ev"},el("div",{class:"ic "+(o.ended?"warn":"bad")},o.ended?"○":"!"),
+          el("div",{style:"min-width:0"},el("div",{class:"t"},o.name),el("div",{class:"d"},o.ended?`Fora por ${dur(o.ended-o.started)} · voltou ${hm(o.ended)}`:"Ainda offline")),
+          el("div",{class:"h"},hm(o.started))))}
+      if(r.outages.length)before=r.outages[r.outages.length-1].started;more.classList.toggle("hidden",!r.has_more)}
+    catch(e){list.replaceChildren(el("div",{class:"empty"},e.message))}finally{more.disabled=false}}
+  more.onclick=page;page();
+  openSheet("Quedas","Períodos em que cada dispositivo ficou sem conexão com o servidor",chips(PERIODS,SHEET.period,k=>{SHEET.period=k;drawOutages()}),box)}
+
+/* ---------- tempo real ---------- */
+function setLive(on){const l=$("#live");l.className="pill "+(on?"p-ok":"p-bad");l.textContent=on?"ao vivo":"offline";if(TAB==="acct")render()}
+function connectWS(){clearTimeout(wsT);if(ws){ws.onclose=null;ws.close()}
+  ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws/ui?s=${encodeURIComponent(TOK)}`);
+  ws.onopen=()=>setLive(true);
+  ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="snapshot"){DEV.clear();m.devices.forEach(d=>DEV.set(d.id,d))}else if(m.type==="device")DEV.set(m.device.id,m.device);else if(m.type==="removed")DEV.delete(m.id);
+    if(TAB!=="acct")render();
+    if(SHEET&&SHEET.type==="dev"&&m.type==="device"&&m.device.id===SHEET.id){const[s]=stateOf(m.device);$("#shS").textContent=`${s} · ${m.device.uuid}`}};
+  ws.onclose=()=>{setLive(false);if(TOK)wsT=setTimeout(connectWS,3000)}}
+async function load(){const r=await api("GET","/api/devices");DEV.clear();r.devices.forEach(d=>DEV.set(d.id,d));render()}
+async function start(){if(!TOK){$("#vLogin").classList.remove("hidden");$("#vApp").classList.add("hidden");return}
+  try{ME=await api("GET","/api/me");$("#vLogin").classList.add("hidden");$("#vApp").classList.remove("hidden");await load();connectWS()}catch(e){toast(e.message)}}
+function logout(){if(TOK)fetch("/api/logout",{method:"POST",headers:{"Authorization":"Bearer "+TOK}}).catch(()=>{});TOK="";ME=null;try{localStorage.removeItem("vl_tok")}catch(e){}
+  if(ws){ws.onclose=null;ws.close();ws=null}clearTimeout(wsT);DEV.clear();if($("#sheet").open)closeSheet();start()}
+$("#fLogin").onsubmit=async e=>{e.preventDefault();try{TOK=(await api("POST","/api/login",{username:$("#lu").value.trim().toLowerCase(),password:$("#lp").value})).token;try{localStorage.setItem("vl_tok",TOK)}catch(err){}$("#lp").value="";start()}catch(err){toast(err.message)}};
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&TOK&&(!ws||ws.readyState>1))connectWS()});
+setInterval(()=>{if(TAB!=="acct"&&!document.hidden)render()},30000);
+start();
+</script>
+</body>
+</html>
