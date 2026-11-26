@@ -37,7 +37,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.5.1"
+VERSION = "2.5.2"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -608,6 +608,15 @@ async def h_blynk_connected(request: web.Request) -> web.Response:
 
 
 # ----------------------------------------------------------------------------- firmware OTA
+def ver_tuple(v: str | None) -> tuple:
+    """'2.4.10' -> (2, 4, 10); partes não numéricas valem 0."""
+    out = []
+    for part in str(v or "").split("."):
+        num = "".join(ch for ch in part if ch.isdigit())
+        out.append(int(num) if num else 0)
+    return tuple(out)
+
+
 def published_fw(st: Store) -> dict | None:
     return st.one("SELECT * FROM firmware WHERE published=1")
 
@@ -623,6 +632,8 @@ async def maybe_ota(app: web.Application, d: dict, force: bool = False) -> str:
         return "nenhum firmware publicado"
     if d["fw"] == fw["version"]:
         return "já atualizado"
+    if ver_tuple(d["fw"]) > ver_tuple(fw["version"]):
+        return f"dispositivo já tem versão mais nova ({d['fw']})"
     if not force:
         if not d["auto_update"]:
             return "atualização automática desligada"
