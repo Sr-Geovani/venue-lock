@@ -30,6 +30,11 @@ import sys
 import threading
 import time
 import unicodedata
+import csv
+import io
+import shutil
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any
 
 try:
@@ -38,7 +43,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.10.0"
+VERSION = "3.0.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -53,6 +58,12 @@ POLICIES = ("release", "hold")
 SESSION_TTL = 30 * 86400
 CMD_TIMEOUT = 6.0
 CMD_IDS = itertools.count(1)
+TZ = ZoneInfo(os.environ.get("VENUELOCK_TZ", "America/Sao_Paulo"))
+TELEGRAM_API = os.environ.get("VENUELOCK_TELEGRAM_API", "https://api.telegram.org")
+ROLES = ("admin", "owner", "operator")
+SCHED_ACTIONS = ("block", "unblock", "lock", "unlock")
+DEFAULT_ALERTS = {"offline_min": 5, "unlocked_min": 30, "refused": True, "ota_fail": True,
+                  "memory": True, "reboot": True, "server": True}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -76,6 +87,15 @@ CREATE TABLE IF NOT EXISTS outages (
   id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   started REAL NOT NULL, ended REAL, reason TEXT);
 CREATE INDEX IF NOT EXISTS ix_outages ON outages(device_id, started DESC);
+CREATE TABLE IF NOT EXISTS user_devices (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, device_id));
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, owner_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  device_id INTEGER REFERENCES devices(id) ON DELETE CASCADE, action TEXT NOT NULL, hhmm TEXT NOT NULL,
+  days INTEGER NOT NULL DEFAULT 127, enabled INTEGER NOT NULL DEFAULT 1, last_run TEXT, created_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS firmware (
   version TEXT PRIMARY KEY, md5 TEXT NOT NULL, size INTEGER NOT NULL, created_at REAL NOT NULL,
   published INTEGER NOT NULL DEFAULT 0);
@@ -94,7 +114,18 @@ DEVICE_MIGRATIONS = [
     ("maxblk", "INTEGER"),
     ("uptime", "INTEGER"),
     ("beta", "INTEGER NOT NULL DEFAULT 0"),
+    ("armed_at", "REAL"),
+    ("unlock_alerted", "INTEGER NOT NULL DEFAULT 0"),
+    ("mem_alerted", "INTEGER NOT NULL DEFAULT 0"),
 ]
+USER_MIGRATIONS = [
+    ("role", "TEXT"),
+    ("parent_id", "INTEGER"),
+    ("telegram_token", "TEXT"),
+    ("telegram_chat", "TEXT"),
+    ("alert_cfg", "TEXT"),
+]
+OUTAGE_MIGRATIONS = [("alerted", "INTEGER NOT NULL DEFAULT 0")]
 FIRMWARE_MIGRATIONS = [
     ("stage", "TEXT NOT NULL DEFAULT 'todos'"),   # 'teste' = só dispositivos de teste recebem
     ("rollback", "INTEGER NOT NULL DEFAULT 0"),   # 1 = volta de versão autorizada (permite versão menor)
@@ -104,6 +135,10 @@ FIRMWARE_MIGRATIONS = [
 # ----------------------------------------------------------------------------- utils
 def fail(cls: type[web.HTTPException], msg: str) -> web.HTTPException:
     return cls(text=json.dumps({"error": msg}), content_type="application/json")
+
+
+def role_of(user: dict) -> str:
+    return user.get("role") or ("admin" if user.get("is_admin") else "owner")
 
 
 def hmac_hex(key: bytes, msg: str) -> str:
@@ -168,6 +203,7 @@ def setup_logging(verbosity: int, as_json: bool) -> None:
 class Store:
     def __init__(self, path: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self.path = os.path.abspath(path)
         self._lock = threading.Lock()
         self._c: sqlite3.Connection | None = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._c.row_factory = sqlite3.Row
@@ -182,11 +218,13 @@ class Store:
             if col not in cols:
                 self.x(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
                 LOG.info("banco migrado: devices.%s", col)
-        fcols = {r["name"] for r in self.q("PRAGMA table_info(firmware)")}
-        for col, ddl in FIRMWARE_MIGRATIONS:
-            if col not in fcols:
-                self.x(f"ALTER TABLE firmware ADD COLUMN {col} {ddl}")
-                LOG.info("banco migrado: firmware.%s", col)
+        for table, migs in (("firmware", FIRMWARE_MIGRATIONS), ("users", USER_MIGRATIONS), ("outages", OUTAGE_MIGRATIONS)):
+            tcols = {r["name"] for r in self.q(f"PRAGMA table_info({table})")}
+            for col, ddl in migs:
+                if col not in tcols:
+                    self.x(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+                    LOG.info("banco migrado: %s.%s", table, col)
+        self.x("UPDATE users SET role = CASE WHEN is_admin=1 THEN 'admin' ELSE 'owner' END WHERE role IS NULL")
         for r in self.q("SELECT id FROM devices WHERE api_token IS NULL"):
             self.x("UPDATE devices SET api_token=? WHERE id=?", (new_api_token(), r["id"]))
         self.x("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_token ON devices(api_token)")
@@ -249,16 +287,43 @@ class Store:
         return self.one("SELECT * FROM devices WHERE api_token=?", (tok,))
 
     def devices_for(self, user: dict) -> list[dict]:
-        if user["is_admin"]:
-            return self.q("SELECT d.*, u.username AS owner FROM devices d JOIN users u ON u.id=d.user_id ORDER BY d.name")
-        return self.q("SELECT d.*, u.username AS owner FROM devices d JOIN users u ON u.id=d.user_id "
-                      "WHERE d.user_id=? ORDER BY d.name", (user["id"],))
+        base = "SELECT d.*, u.username AS owner FROM devices d JOIN users u ON u.id=d.user_id"
+        r = role_of(user)
+        if r == "admin":
+            return self.q(base + " ORDER BY d.name")
+        if r == "operator":
+            return self.q(base + " JOIN user_devices ud ON ud.device_id=d.id WHERE ud.user_id=? ORDER BY d.name",
+                          (user["id"],))
+        return self.q(base + " WHERE d.user_id=? ORDER BY d.name", (user["id"],))
+
+    def sees(self, user: dict, d: dict) -> bool:
+        r = role_of(user)
+        if r == "admin" or d["user_id"] == user["id"]:
+            return True
+        return r == "operator" and bool(self.one("SELECT 1 FROM user_devices WHERE user_id=? AND device_id=?",
+                                                 (user["id"], d["id"])))
+
+    def get_meta(self, key: str, default: str = "") -> str:
+        r = self.one("SELECT value FROM meta WHERE key=?", (key,))
+        return r["value"] if r else default
+
+    def set_meta(self, key: str, value: str) -> None:
+        self.x("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def set_armed(self, did: int, armed: int) -> None:
+        """Atualiza o estado trancado/destrancado e marca quando mudou (alerta de 'destrancada há X min')."""
+        d = self.device(did)
+        if d is None:
+            return
+        if d["armed"] != armed or d["armed_at"] is None:
+            self.update_device(did, armed=armed, armed_at=time.time(), unlock_alerted=0)
 
     def update_device(self, did: int, **f: Any) -> None:
         allowed = {"name", "policy", "grace_s", "release_ms", "pin", "egress_ok", "armed",
                    "fw", "ip", "host", "rssi", "boot", "last_seen",
                    "api_token", "open_value", "auto_update", "ota_ver", "ota_at", "blocked",
-                   "heap", "heap_min", "maxblk", "uptime", "beta"}
+                   "heap", "heap_min", "maxblk", "uptime", "beta",
+                   "armed_at", "unlock_alerted", "mem_alerted"}
         if set(f) - allowed:
             raise ValueError(f"campos inválidos: {set(f) - allowed}")
         if f:
@@ -316,7 +381,7 @@ class Hub:
             return
         msg = {"type": "device", "device": self.view(d)}
         for ws, user in list(self.uis.items()):
-            if user["is_admin"] or user["id"] == d["user_id"]:
+            if store.sees(user, d):
                 with contextlib.suppress(ConnectionError, RuntimeError):
                     await ws.send_json(msg)
 
@@ -347,12 +412,23 @@ def current_user(request: web.Request) -> dict:
     return user
 
 
-def owned_device(request: web.Request) -> tuple[dict, dict]:
+def owned_device(request: web.Request, manage: bool = True) -> tuple[dict, dict]:
+    """manage=True: só admin/dono (ajustes). manage=False: operador da loja também (comandos e registros)."""
     user = current_user(request)
-    d = request.app[STORE].device(int(request.match_info["id"]))
-    if d is None or (not user["is_admin"] and d["user_id"] != user["id"]):
+    st = request.app[STORE]
+    d = st.device(int(request.match_info["id"]))
+    if d is None or not st.sees(user, d):
         raise fail(web.HTTPNotFound, "dispositivo não encontrado")
+    if manage and role_of(user) == "operator":
+        raise fail(web.HTTPForbidden, "operador não pode alterar ajustes")
     return user, d
+
+
+def require_manager(request: web.Request) -> dict:
+    u = current_user(request)
+    if role_of(u) == "operator":
+        raise fail(web.HTTPForbidden, "apenas administrador ou dono da conta")
+    return u
 
 
 async def body_json(request: web.Request) -> dict:
@@ -417,7 +493,9 @@ async def h_logout(request: web.Request) -> web.Response:
 
 async def h_me(request: web.Request) -> web.Response:
     u = current_user(request)
-    return web.json_response({"username": u["username"], "is_admin": bool(u["is_admin"]), "secret": u["secret"]})
+    r = role_of(u)
+    return web.json_response({"username": u["username"], "is_admin": r == "admin", "role": r,
+                              "secret": None if r == "operator" else u["secret"]})
 
 
 async def h_password(request: web.Request) -> web.Response:
@@ -430,7 +508,7 @@ async def h_password(request: web.Request) -> web.Response:
 
 
 async def h_rotate_secret(request: web.Request) -> web.Response:
-    u = current_user(request)
+    u = require_manager(request)
     sec = secrets.token_urlsafe(30)
     request.app[STORE].x("UPDATE users SET secret=? WHERE id=?", (sec, u["id"]))
     hub = request.app[HUB]
@@ -442,23 +520,82 @@ async def h_rotate_secret(request: web.Request) -> web.Response:
     return web.json_response({"secret": sec})
 
 
+def user_view(st: Store, u: dict) -> dict:
+    devs = [r["device_id"] for r in st.q("SELECT device_id FROM user_devices WHERE user_id=?", (u["id"],))]
+    return {"id": u["id"], "username": u["username"], "role": role_of(u), "created_at": u["created_at"],
+            "parent_id": u.get("parent_id"), "devices": devs}
+
+
+def manageable_user(request: web.Request, me: dict) -> dict:
+    st = request.app[STORE]
+    t = st.one("SELECT * FROM users WHERE id=?", (int(request.match_info["uid"]),))
+    if t is None or t["id"] == me["id"] or (role_of(me) != "admin" and t.get("parent_id") != me["id"]):
+        raise fail(web.HTTPNotFound, "usuário não encontrado")
+    return t
+
+
+def check_device_ids(st: Store, me: dict, ids: Any) -> list[int]:
+    if not isinstance(ids, list):
+        raise ValueError("devices deve ser uma lista")
+    allowed = {d["id"] for d in st.devices_for(me)}
+    out = []
+    for i in ids:
+        if not isinstance(i, int) or i not in allowed:
+            raise ValueError(f"dispositivo {i} não pertence à sua conta")
+        out.append(i)
+    return out
+
+
 async def h_users(request: web.Request) -> web.Response:
-    u = current_user(request)
-    if not u["is_admin"]:
-        raise fail(web.HTTPForbidden, "apenas administradores")
+    """Admin vê/cria todos; dono cria operadores (funcionários) só com as portas dele."""
+    me = require_manager(request)
     st = request.app[STORE]
     if request.method == "GET":
-        return web.json_response({"users": st.q(
-            "SELECT u.id, u.username, u.is_admin, u.created_at, COUNT(d.id) AS devices FROM users u "
-            "LEFT JOIN devices d ON d.user_id=u.id GROUP BY u.id ORDER BY u.username")})
+        rows = st.q("SELECT * FROM users ORDER BY username") if role_of(me) == "admin" else \
+            st.q("SELECT * FROM users WHERE parent_id=? ORDER BY username", (me["id"],))
+        return web.json_response({"users": [user_view(st, u) for u in rows if u["id"] != me["id"]]})
     b = await body_json(request)
     name = str(b.get("username", "")).strip().lower()
     if not USER_RE.match(name):
         raise ValueError("usuário: 3-32 caracteres a-z 0-9 _ . -")
     if st.user_by_name(name):
         raise fail(web.HTTPConflict, "usuário já existe")
-    nu = st.create_user(name, validate_pw(b.get("password")), bool(b.get("is_admin")))
-    return web.json_response({"id": nu["id"], "username": nu["username"]}, status=201)
+    role = b.get("role", "operator")
+    if role not in ROLES or (role != "operator" and role_of(me) != "admin"):
+        raise fail(web.HTTPForbidden, "você só pode criar operadores")
+    devs = check_device_ids(st, me, b.get("devices", [])) if role == "operator" else []
+    nu = st.create_user(name, validate_pw(b.get("password")), role == "admin")
+    st.x("UPDATE users SET role=?, parent_id=? WHERE id=?", (role, me["id"] if role == "operator" else None, nu["id"]))
+    for d in devs:
+        st.x("INSERT OR IGNORE INTO user_devices(user_id,device_id) VALUES(?,?)", (nu["id"], d))
+    LOG.info("usuário %s (%s) criado por %s", name, role, me["username"])
+    return web.json_response(user_view(st, st.one("SELECT * FROM users WHERE id=?", (nu["id"],))), status=201)
+
+
+async def h_user_patch(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    st = request.app[STORE]
+    t = manageable_user(request, me)
+    b = await body_json(request)
+    if "password" in b:
+        st.x("UPDATE users SET pw_hash=? WHERE id=?", (hash_pw(validate_pw(b["password"])), t["id"]))
+        st.x("DELETE FROM sessions WHERE user_id=?", (t["id"],))
+    if "devices" in b:
+        devs = check_device_ids(st, me, b["devices"])
+        st.x("DELETE FROM user_devices WHERE user_id=?", (t["id"],))
+        for d in devs:
+            st.x("INSERT OR IGNORE INTO user_devices(user_id,device_id) VALUES(?,?)", (t["id"], d))
+    return web.json_response(user_view(st, st.one("SELECT * FROM users WHERE id=?", (t["id"],))))
+
+
+async def h_user_delete(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    st = request.app[STORE]
+    t = manageable_user(request, me)
+    if st.one("SELECT 1 FROM devices WHERE user_id=? LIMIT 1", (t["id"],)):
+        raise fail(web.HTTPConflict, "este usuário é dono de dispositivos: remova-os antes")
+    st.x("DELETE FROM users WHERE id=?", (t["id"],))
+    return web.json_response({"deleted": t["id"]})
 
 
 # ----------------------------------------------------------------------------- device API
@@ -572,7 +709,7 @@ async def send_cmd(app: web.Application, d: dict, a: str, source: str, detail: s
 
 
 async def h_cmd(request: web.Request) -> web.Response:
-    u, d = owned_device(request)
+    u, d = owned_device(request, manage=False)
     b = await body_json(request)
     a = b.get("a")
     if a not in ACTIONS:
@@ -589,6 +726,19 @@ async def h_cmd(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def set_blocked_many(app: web.Application, devs: list[dict], on: bool, source: str) -> None:
+    st, hub = app[STORE], app[HUB]
+    val = 1 if on else 0
+    for d in devs:
+        if d["blocked"] != val:
+            st.update_device(d["id"], blocked=val)
+            st.event(d["id"], "bloqueado" if val else "desbloqueado", source)
+        c = hub.conns.get(d["id"])
+        if c:
+            await c.send_signed(cfg_payload(st.device(d["id"])))
+        await hub.push(st, d["id"])
+
+
 async def h_bulk(request: web.Request) -> web.Response:
     """Comando geral: trancar/destrancar/liberar todas as portas do usuário de uma vez."""
     u = current_user(request)
@@ -599,15 +749,7 @@ async def h_bulk(request: web.Request) -> web.Response:
     st, hub = request.app[STORE], request.app[HUB]
     devs = st.devices_for(u)
     if a in ("block", "unblock"):
-        val = 1 if a == "block" else 0
-        for d in devs:
-            if d["blocked"] != val:
-                st.update_device(d["id"], blocked=val)
-                st.event(d["id"], "bloqueado" if val else "desbloqueado", f"app:{u['username']} (geral)")
-            c = hub.conns.get(d["id"])
-            if c:
-                await c.send_signed(cfg_payload(st.device(d["id"])))
-            await hub.push(st, d["id"])
+        await set_blocked_many(request.app, devs, a == "block", f"app:{u['username']} (geral)")
         online = [d["name"] for d in devs if d["id"] in hub.conns]
         LOG.warning("comando geral %s por %s (%d portas)", a, u["username"], len(devs))
         return web.json_response({"ok": len(devs), "total": len(devs),
@@ -868,7 +1010,7 @@ def period_args(request: web.Request) -> tuple[float, float, float | None, int]:
 
 
 async def h_events(request: web.Request) -> web.Response:
-    _, d = owned_device(request)
+    _, d = owned_device(request, manage=False)
     t_from, t_to, before, lim = period_args(request)
     sql = "SELECT ts, kind, source, detail FROM events WHERE device_id=? AND ts>=? AND ts<?"
     p: list[Any] = [d["id"], t_from, t_to]
@@ -895,9 +1037,9 @@ async def h_outages(request: web.Request) -> web.Response:
     sql = ("SELECT o.device_id, d.name, o.started, o.ended, o.reason FROM outages o JOIN devices d ON d.id=o.device_id "
            "WHERE o.started>=? AND o.started<?")
     p: list[Any] = [t_from, t_to]
-    if not u["is_admin"]:
-        sql += " AND d.user_id=?"
-        p.append(u["id"])
+    ids = [d["id"] for d in request.app[STORE].devices_for(u)] or [-1]
+    sql += f" AND o.device_id IN ({','.join('?' * len(ids))})"
+    p += ids
     if request.query.get("device", "").isdigit():
         sql += " AND o.device_id=?"
         p.append(int(request.query["device"]))
@@ -920,7 +1062,8 @@ async def handle_esp_msg(app: web.Application, c: DevConn, m: dict) -> None:
             fut.set_result(m)
     elif t == "st":
         c.live.update(relay=bool(m.get("relay")), free=bool(m.get("free")))
-        st.update_device(c.did, armed=1 if m.get("armed") else 0, last_seen=time.time())
+        st.set_armed(c.did, 1 if m.get("armed") else 0)
+        st.update_device(c.did, last_seen=time.time())
         await hub.push(st, c.did)
     elif t == "ev":
         if m.get("src") == "app":
@@ -970,6 +1113,8 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
     app = request.app
     st, hub = app[STORE], app[HUB]
     user = st.user_by_name(request.query.get("u", "").lower())
+    if user is not None and role_of(user) == "operator":
+        user = None
     if user is None:
         LOG.warning("esp: usuário desconhecido %r de %s", request.query.get("u"), client_ip(request))
         raise fail(web.HTTPUnauthorized, "usuário desconhecido")
@@ -1008,8 +1153,8 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
     ip = client_ip(request)
     st.update_device(did, fw=str(hello.get("fw", ""))[:24], ip=str(hello.get("ip", ip))[:45],
                      host=str(hello.get("host", ""))[:40], rssi=int(hello.get("rssi", 0)),
-                     boot=str(hello.get("boot", ""))[:160], armed=1 if hello.get("armed") else 0,
-                     last_seen=time.time())
+                     boot=str(hello.get("boot", ""))[:160], last_seen=time.time(), mem_alerted=0)
+    st.set_armed(did, 1 if hello.get("armed") else 0)
     lcfg = hello.get("lcfg")
     if isinstance(lcfg, dict):
         applied = apply_local_cfg(st, did, lcfg)
@@ -1071,6 +1216,434 @@ async def ws_ui(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+# ----------------------------------------------------------------------------- agenda
+DAY_NAMES = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
+
+
+def sched_view(st: Store, r: dict) -> dict:
+    d = st.device(r["device_id"]) if r["device_id"] else None
+    return {**r, "device_name": d["name"] if d else None, "days_list": [i for i in range(7) if r["days"] >> i & 1]}
+
+
+async def h_schedules(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    st = request.app[STORE]
+    if request.method == "GET":
+        rows = st.q("SELECT * FROM schedules ORDER BY hhmm") if role_of(me) == "admin" else \
+            st.q("SELECT * FROM schedules WHERE owner_id=? ORDER BY hhmm", (me["id"],))
+        return web.json_response({"schedules": [sched_view(st, r) for r in rows], "tz": str(TZ)})
+    b = await body_json(request)
+    action = b.get("action")
+    if action not in SCHED_ACTIONS:
+        raise ValueError(f"ação deve ser {SCHED_ACTIONS}")
+    hhmm = str(b.get("hhmm", ""))
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", hhmm):
+        raise ValueError("horário no formato HH:MM")
+    days = b.get("days", list(range(7)))
+    if not isinstance(days, list) or not days or any(not isinstance(x, int) or not 0 <= x <= 6 for x in days):
+        raise ValueError("dias: lista de 0 (seg) a 6 (dom)")
+    dev = b.get("device_id")
+    if dev is not None:
+        check_device_ids(st, me, [dev])
+    mask = sum(1 << x for x in set(days))
+    sid, _ = st.x("INSERT INTO schedules(owner_id,device_id,action,hhmm,days,enabled,created_at) VALUES(?,?,?,?,?,1,?)",
+                  (me["id"], dev, action, hhmm, mask, time.time()))
+    return web.json_response(sched_view(st, st.one("SELECT * FROM schedules WHERE id=?", (sid,))), status=201)
+
+
+def own_schedule(request: web.Request, me: dict) -> dict:
+    r = request.app[STORE].one("SELECT * FROM schedules WHERE id=?", (int(request.match_info["sid"]),))
+    if r is None or (role_of(me) != "admin" and r["owner_id"] != me["id"]):
+        raise fail(web.HTTPNotFound, "agendamento não encontrado")
+    return r
+
+
+async def h_schedule_patch(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    r = own_schedule(request, me)
+    b = await body_json(request)
+    if "enabled" in b:
+        request.app[STORE].x("UPDATE schedules SET enabled=? WHERE id=?", (1 if b["enabled"] else 0, r["id"]))
+    return web.json_response({"ok": True})
+
+
+async def h_schedule_delete(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    r = own_schedule(request, me)
+    request.app[STORE].x("DELETE FROM schedules WHERE id=?", (r["id"],))
+    return web.json_response({"deleted": r["id"]})
+
+
+async def run_schedule(app: web.Application, r: dict) -> None:
+    st = app[STORE]
+    owner = st.one("SELECT * FROM users WHERE id=?", (r["owner_id"],))
+    if owner is None:
+        return
+    devs = [st.device(r["device_id"])] if r["device_id"] else st.devices_for(owner)
+    devs = [d for d in devs if d]
+    label = f"agenda {r['hhmm']}"
+    if r["action"] in ("block", "unblock"):
+        await set_blocked_many(app, devs, r["action"] == "block", label)
+    else:
+        for d in devs:
+            await send_cmd(app, d, r["action"], label)
+    LOG.info("agenda %s %s executada em %d porta(s)", r["hhmm"], r["action"], len(devs))
+
+
+async def schedule_loop(app: web.Application) -> None:
+    """Confere a agenda a cada 20 s. Se o servidor estava fora no horário exato, executa em até 10 min."""
+    while True:
+        try:
+            now = datetime.now(TZ)
+            today = now.strftime("%Y-%m-%d")
+            st = app[STORE]
+            for r in st.q("SELECT * FROM schedules WHERE enabled=1 AND (last_run IS NULL OR last_run<>?)", (today,)):
+                if not r["days"] >> now.weekday() & 1:
+                    continue
+                h, m = map(int, r["hhmm"].split(":"))
+                at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if at <= now < at + timedelta(minutes=10):
+                    st.x("UPDATE schedules SET last_run=? WHERE id=?", (today, r["id"]))
+                    await run_schedule(app, r)
+        except RuntimeError:
+            return
+        except Exception:
+            LOG.exception("schedule_loop")
+        await asyncio.sleep(20)
+
+
+# ----------------------------------------------------------------------------- alertas (Telegram)
+def alert_cfg(u: dict) -> dict:
+    try:
+        return {**DEFAULT_ALERTS, **json.loads(u.get("alert_cfg") or "{}")}
+    except (TypeError, ValueError):
+        return dict(DEFAULT_ALERTS)
+
+
+def html_esc(t: str) -> str:
+    return str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+async def telegram_send(app: web.Application, token: str, chat: str, text: str) -> str:
+    """Retorna '' se enviou, senão o motivo."""
+    try:
+        async with app[HTTP].post(f"{TELEGRAM_API}/bot{token}/sendMessage",
+                                  json={"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                        "disable_web_page_preview": True}) as r:
+            if r.status == 200:
+                return ""
+            d = await r.json(content_type=None)
+            return str(d.get("description", f"HTTP {r.status}"))
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def recipients(st: Store, d: dict | None) -> list[dict]:
+    """Quem recebe alerta de um dispositivo: o dono e os administradores com Telegram configurado."""
+    rows = st.q("SELECT * FROM users WHERE telegram_token IS NOT NULL AND telegram_token<>'' "
+                "AND telegram_chat IS NOT NULL AND telegram_chat<>''")
+    out = []
+    for u in rows:
+        r = role_of(u)
+        if r == "admin" or (d is not None and r == "owner" and d["user_id"] == u["id"]):
+            out.append(u)
+    return out
+
+
+async def notify(app: web.Application, d: dict | None, key: str, text: str) -> None:
+    st = app[STORE]
+    for u in recipients(st, d):
+        cfg = alert_cfg(u)
+        if key in cfg and not cfg[key]:
+            continue
+        err = await telegram_send(app, u["telegram_token"], u["telegram_chat"], text)
+        if err:
+            LOG.warning("alerta para %s falhou: %s", u["username"], err)
+
+
+def fmt_dur(sec: float) -> str:
+    sec = int(sec)
+    if sec < 3600:
+        return f"{sec // 60} min"
+    if sec < 86400:
+        return f"{sec // 3600} h {sec % 3600 // 60} min"
+    return f"{sec // 86400} d {sec % 86400 // 3600} h"
+
+
+NORMAL_BOOTS = ("Power On", "Software/System restart", "External System", "Deep-Sleep Wake")
+
+
+async def alert_loop(app: web.Application) -> None:
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await alert_tick(app)
+        except RuntimeError:
+            return
+        except Exception:
+            LOG.exception("alert_loop")
+        await asyncio.sleep(20)
+
+
+async def alert_tick(app: web.Application) -> None:
+    st, hub = app[STORE], app[HUB]
+    now = time.time()
+    owners = {u["id"]: u for u in st.q("SELECT * FROM users")}
+
+    def threshold(d: dict, key: str) -> float:
+        u = owners.get(d["user_id"]) or {}
+        return float(alert_cfg(u).get(key) or DEFAULT_ALERTS[key]) * 60
+
+    # 1) porta offline há mais de X min / voltou
+    for o in st.q("SELECT o.*, d.name, d.user_id FROM outages o JOIN devices d ON d.id=o.device_id "
+                  "WHERE (o.ended IS NULL AND o.alerted=0) OR (o.ended IS NOT NULL AND o.alerted=1)"):
+        d = st.device(o["device_id"])
+        if d is None:
+            continue
+        if o["ended"] is None and now - o["started"] >= threshold(d, "offline_min"):
+            st.x("UPDATE outages SET alerted=1 WHERE id=?", (o["id"],))
+            await notify(app, d, "offline_min", f"🔴 <b>{html_esc(d['name'])}</b> está <b>offline</b> há "
+                         f"{fmt_dur(now - o['started'])}.\nNo local: página .local, Wi-Fi VENUE-… ou botão físico.")
+        elif o["ended"] is not None and o["alerted"] == 1:
+            st.x("UPDATE outages SET alerted=2 WHERE id=?", (o["id"],))
+            await notify(app, d, "offline_min", f"🟢 <b>{html_esc(d['name'])}</b> voltou após {fmt_dur(o['ended'] - o['started'])} offline.")
+    # 2) destrancada há mais de X min
+    for d in st.q("SELECT * FROM devices WHERE armed=0 AND unlock_alerted=0 AND armed_at IS NOT NULL"):
+        if d["id"] in hub.conns and now - d["armed_at"] >= threshold(d, "unlocked_min"):
+            st.update_device(d["id"], unlock_alerted=1)
+            await notify(app, d, "unlocked_min", f"🟡 <b>{html_esc(d['name'])}</b> está <b>destrancada</b> há "
+                         f"{fmt_dur(now - d['armed_at'])}.")
+    # 3) memória baixa no ESP
+    for d in st.q("SELECT * FROM devices WHERE heap_min IS NOT NULL AND heap_min<6000 AND mem_alerted=0"):
+        st.update_device(d["id"], mem_alerted=1)
+        await notify(app, d, "memory", f"🟠 <b>{html_esc(d['name'])}</b> com memória baixa ({d['heap_min']} bytes). "
+                     "Se reiniciar sozinho, avise o suporte.")
+    # 4) eventos: abertura recusada, falha de atualização, reinício inesperado
+    last = int(st.get_meta("alert_last_event", "0") or 0)
+    if last == 0:
+        r = st.one("SELECT MAX(id) AS m FROM events")
+        st.set_meta("alert_last_event", str(r["m"] or 0))
+        return
+    rows = st.q("SELECT * FROM events WHERE id>? ORDER BY id LIMIT 200", (last,))
+    for e in rows:
+        d = st.device(e["device_id"])
+        if d is None:
+            continue
+        det = e["detail"] or ""
+        if e["kind"] == "recusado_blq" or det.startswith("recusado: bloqueado"):
+            await notify(app, d, "refused", f"🚫 Abertura <b>recusada</b> em <b>{html_esc(d['name'])}</b> (bloqueada). "
+                         f"Origem: {html_esc(e['source'])}.")
+        elif e["kind"] == "ota_falha":
+            await notify(app, d, "ota_fail", f"⚠️ Atualização falhou em <b>{html_esc(d['name'])}</b>: {html_esc(det)}")
+        elif e["kind"] == "boot" and det and not any(det.startswith(b) for b in NORMAL_BOOTS):
+            await notify(app, d, "reboot", f"⚠️ <b>{html_esc(d['name'])}</b> reiniciou sozinho: {html_esc(det[:120])}")
+    if rows:
+        st.set_meta("alert_last_event", str(rows[-1]["id"]))
+    # 5) saúde do servidor (1 aviso por dia por problema)
+    today = datetime.now(TZ).strftime("%Y-%m-%d")
+    for prob in server_problems(app):
+        k = "srv_alert_" + prob["key"]
+        if st.get_meta(k) != today:
+            st.set_meta(k, today)
+            await notify(app, None, "server", f"🖥️ Servidor VENUE: {html_esc(prob['msg'])}")
+
+
+async def h_alerts(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    st = request.app[STORE]
+    if request.method == "GET":
+        tok = me.get("telegram_token") or ""
+        return web.json_response({"telegram_chat": me.get("telegram_chat") or "",
+                                  "telegram_token_set": bool(tok), "telegram_token_hint": tok[-4:] if tok else "",
+                                  "cfg": alert_cfg(me)})
+    b = await body_json(request)
+    if "telegram_token" in b and b["telegram_token"] is not None:
+        tok = str(b["telegram_token"]).strip()
+        if tok and not re.fullmatch(r"\d{5,15}:[A-Za-z0-9_-]{30,50}", tok):
+            raise ValueError("token do bot inválido (formato 123456:ABC…)")
+        st.x("UPDATE users SET telegram_token=? WHERE id=?", (tok or None, me["id"]))
+    if "telegram_chat" in b:
+        chat = str(b["telegram_chat"]).strip()
+        if chat and not re.fullmatch(r"-?\d{3,20}|@[A-Za-z0-9_]{5,32}", chat):
+            raise ValueError("chat id inválido (número, ex.: 123456789 ou -100…)")
+        st.x("UPDATE users SET telegram_chat=? WHERE id=?", (chat or None, me["id"]))
+    if isinstance(b.get("cfg"), dict):
+        cfg = alert_cfg(me)
+        for k, v in b["cfg"].items():
+            if k in ("offline_min", "unlocked_min"):
+                v = int(v)
+                if not 1 <= v <= 1440:
+                    raise ValueError(f"{k}: 1 a 1440 minutos")
+                cfg[k] = v
+            elif k in DEFAULT_ALERTS:
+                cfg[k] = bool(v)
+        st.x("UPDATE users SET alert_cfg=? WHERE id=?", (json.dumps(cfg), me["id"]))
+    return web.json_response({"ok": True})
+
+
+async def h_alerts_test(request: web.Request) -> web.Response:
+    me = require_manager(request)
+    u = request.app[STORE].one("SELECT * FROM users WHERE id=?", (me["id"],))
+    if not u.get("telegram_token") or not u.get("telegram_chat"):
+        raise fail(web.HTTPConflict, "configure o token do bot e o chat id")
+    err = await telegram_send(request.app, u["telegram_token"], u["telegram_chat"],
+                              "✅ VENUE LOCK: alertas configurados. Você vai receber os avisos aqui.")
+    if err:
+        raise fail(web.HTTPBadGateway, f"Telegram recusou: {err}")
+    return web.json_response({"ok": True})
+
+
+# ----------------------------------------------------------------------------- relatórios
+SRC_GROUP = (("sistema", "sistema"), ("app:", "app"), ("esp:botao", "botao"), ("esp:local", "local"),
+             ("esp:ap", "local"), ("agenda", "agenda"))
+
+
+def src_group(src: str) -> str:
+    for prefix, g in SRC_GROUP:
+        if src.startswith(prefix):
+            return g
+    return "outro"
+
+
+async def h_reports(request: web.Request) -> web.Response:
+    u = current_user(request)
+    st = request.app[STORE]
+    t_from, t_to, _, _ = period_args(request)
+    now = time.time()
+    t_to = min(t_to, now)
+    out = []
+    for d in st.devices_for(u):
+        start = max(t_from, d["created_at"])
+        span = max(1.0, t_to - start)
+        rel = {"sistema": 0, "app": 0, "botao": 0, "local": 0, "agenda": 0, "outro": 0}
+        refused = locks = unlocks = 0
+        for e in st.q("SELECT kind, source, detail FROM events WHERE device_id=? AND ts>=? AND ts<? "
+                      "AND kind IN ('release','lock','unlock','recusado_blq') AND source<>'esp:app'",
+                      (d["id"], start, t_to)):
+            det = e["detail"] or ""
+            if e["kind"] == "recusado_blq" or det.startswith("recusado"):
+                refused += 1
+            elif e["kind"] == "release" and not det.startswith("sem confirma"):
+                rel[src_group(e["source"])] += 1
+            elif e["kind"] == "lock":
+                locks += 1
+            elif e["kind"] == "unlock":
+                unlocks += 1
+        off = 0.0
+        n_out = 0
+        for o in st.q("SELECT started, ended FROM outages WHERE device_id=? AND (ended IS NULL OR ended>?) AND started<?",
+                      (d["id"], start, t_to)):
+            a, b2 = max(o["started"], start), min(o["ended"] or now, t_to)
+            if b2 > a:
+                off += b2 - a
+                n_out += 1
+        out.append({"id": d["id"], "name": d["name"], "releases": rel, "releases_total": sum(rel.values()),
+                    "refused": refused, "locks": locks, "unlocks": unlocks, "outages": n_out,
+                    "offline_s": round(off), "availability": round(100 * (1 - off / span), 2)})
+    return web.json_response({"from": t_from, "to": t_to, "devices": out})
+
+
+async def h_export_csv(request: web.Request) -> web.Response:
+    u = current_user(request)
+    st = request.app[STORE]
+    t_from, t_to, _, _ = period_args(request)
+    devs = {d["id"]: d for d in st.devices_for(u)}
+    if request.query.get("device", "").isdigit():
+        devs = {k: v for k, v in devs.items() if k == int(request.query["device"])}
+    ids = list(devs) or [-1]
+    rows = st.q(f"SELECT device_id, ts, kind, source, detail FROM events WHERE device_id IN ({','.join('?' * len(ids))}) "
+                "AND ts>=? AND ts<? AND source<>'esp:app' ORDER BY ts", (*ids, t_from, t_to))
+    buf = io.StringIO()
+    w = csv.writer(buf, delimiter=";")
+    w.writerow(["data", "hora", "dispositivo", "evento", "origem", "detalhe"])
+    for r in rows[:100000]:
+        dt = datetime.fromtimestamp(r["ts"], TZ)
+        w.writerow([dt.strftime("%d/%m/%Y"), dt.strftime("%H:%M:%S"), devs[r["device_id"]]["name"],
+                    r["kind"], r["source"], r["detail"] or ""])
+    name = f"venue-registros-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.csv"
+    return web.Response(body=("﻿" + buf.getvalue()).encode("utf-8"), content_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ----------------------------------------------------------------------------- saúde / disponibilidade
+STARTED_AT = time.time()
+
+
+def server_status(app: web.Application) -> dict:
+    st = app[STORE]
+    data_dir = os.path.dirname(st.path)
+    du = shutil.disk_usage(data_dir)
+    backups = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.startswith("backup-") and f.endswith(".db")]
+    last_backup = max((os.path.getmtime(b) for b in backups), default=None)
+    db_path = st.path
+    devs = st.q("SELECT id, heap_min FROM devices")
+    online = sum(1 for d in devs if d["id"] in app[HUB].conns)
+    heaps = [d["heap_min"] for d in devs if d["heap_min"]]
+    return {"version": VERSION, "uptime_s": round(time.time() - STARTED_AT),
+            "disk_free_pct": round(100 * du.free / du.total, 1), "disk_free_gb": round(du.free / 2**30, 1),
+            "db_mb": round(os.path.getsize(db_path) / 2**20, 2) if os.path.exists(db_path) else 0,
+            "last_backup": last_backup, "devices": len(devs), "online": online,
+            "lowest_heap": min(heaps) if heaps else None}
+
+
+def server_problems(app: web.Application) -> list[dict]:
+    s = server_status(app)
+    out = []
+    if s["disk_free_pct"] < 10:
+        out.append({"key": "disk", "msg": f"disco quase cheio ({s['disk_free_pct']}% livre)"})
+    if s["last_backup"] is None and time.time() - STARTED_AT > 26 * 3600:
+        out.append({"key": "backup", "msg": "nenhum backup do banco encontrado"})
+    elif s["last_backup"] and time.time() - s["last_backup"] > 26 * 3600:
+        out.append({"key": "backup", "msg": f"último backup há {fmt_dur(time.time() - s['last_backup'])}"})
+    return out
+
+
+async def h_status(request: web.Request) -> web.Response:
+    require_manager(request)
+    return web.json_response({**server_status(request.app), "problems": server_problems(request.app)})
+
+
+# ----------------------------------------------------------------------------- gravação pelo navegador
+FLASH = web.AppKey("flash", dict)
+
+
+async def h_flash_link(request: web.Request) -> web.Response:
+    u = current_user(request)
+    if role_of(u) != "admin":
+        raise fail(web.HTTPForbidden, "apenas administradores")
+    fw = published_fw(request.app[STORE])
+    if fw is None:
+        raise fail(web.HTTPConflict, "nenhum firmware publicado (rode o install.sh na VPS)")
+    k = secrets.token_urlsafe(24)
+    links = request.app[FLASH]
+    for old in [x for x, v in links.items() if v["exp"] < time.time()]:
+        links.pop(old, None)
+    links[k] = {"ver": fw["version"], "exp": time.time() + 900}
+    LOG.warning("link de gravação do firmware %s gerado por %s", fw["version"], u["username"])
+    return web.json_response({"manifest": f"/flash/{k}/manifest.json", "version": fw["version"]})
+
+
+def flash_entry(request: web.Request) -> dict:
+    e = request.app[FLASH].get(request.match_info["k"])
+    if e is None or e["exp"] < time.time():
+        raise web.HTTPNotFound()
+    return e
+
+
+async def h_flash_manifest(request: web.Request) -> web.Response:
+    e = flash_entry(request)
+    return web.json_response({"name": "VENUE Lock", "version": e["ver"], "new_install_prompt_erase": True,
+                              "builds": [{"chipFamily": "ESP8266", "parts": [{"path": "fw.bin", "offset": 0}]}]})
+
+
+async def h_flash_bin(request: web.Request) -> web.StreamResponse:
+    e = flash_entry(request)
+    path = os.path.join(request.app[FWDIR], f"{e['ver']}.bin")
+    if not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={"Content-Type": "application/octet-stream", "Cache-Control": "no-store"})
+
+
 # ----------------------------------------------------------------------------- static / app
 PWA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pwa.html")
 
@@ -1112,18 +1685,29 @@ async def h_sw(_: web.Request) -> web.Response:
 
 
 async def h_health(request: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "version": VERSION, "esp_online": len(request.app[HUB].conns)})
+    probs = server_problems(request.app)
+    return web.json_response({"ok": True, "version": VERSION, "esp_online": len(request.app[HUB].conns),
+                              "warnings": len(probs)})
 
 
 OTA_TASK = web.AppKey("ota_task", asyncio.Task)
+BG_TASKS = web.AppKey("bg_tasks", list)
+HTTP = web.AppKey("http", object)
 
 
 async def on_startup(app: web.Application) -> None:
+    import aiohttp
+    app[HTTP] = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
     app[OTA_TASK] = asyncio.create_task(ota_loop(app))
+    app[BG_TASKS] = [asyncio.create_task(schedule_loop(app)), asyncio.create_task(alert_loop(app))]
 
 
 async def on_shutdown(app: web.Application) -> None:
     app[OTA_TASK].cancel()
+    for t in app[BG_TASKS]:
+        t.cancel()
+    with contextlib.suppress(Exception):
+        await app[HTTP].close()
     hub = app[HUB]
     for ws in [c.ws for c in hub.conns.values()] + list(hub.uis):
         with contextlib.suppress(Exception):
@@ -1137,7 +1721,7 @@ async def on_cleanup(app: web.Application) -> None:
 def build_app(store: Store, fwdir: str) -> web.Application:
     os.makedirs(fwdir, exist_ok=True)
     app = web.Application(middlewares=[errors_mw], client_max_size=MAX_FW_BYTES + 65536)
-    app[STORE], app[HUB], app[FAILS], app[FWDIR] = store, Hub(), {}, fwdir
+    app[STORE], app[HUB], app[FAILS], app[FWDIR], app[FLASH] = store, Hub(), {}, fwdir, {}
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
     app.on_cleanup.append(on_cleanup)
@@ -1163,6 +1747,21 @@ def build_app(store: Store, fwdir: str) -> web.Application:
     r.add_post("/api/devices/bulk", h_bulk)
     r.add_get(r"/api/devices/{id:\d+}/events", h_events)
     r.add_get("/api/outages", h_outages)
+    r.add_route("PATCH", r"/api/users/{uid:\d+}", h_user_patch)
+    r.add_route("DELETE", r"/api/users/{uid:\d+}", h_user_delete)
+    r.add_route("GET", "/api/schedules", h_schedules)
+    r.add_route("POST", "/api/schedules", h_schedules)
+    r.add_route("PATCH", r"/api/schedules/{sid:\d+}", h_schedule_patch)
+    r.add_route("DELETE", r"/api/schedules/{sid:\d+}", h_schedule_delete)
+    r.add_route("GET", "/api/alerts", h_alerts)
+    r.add_route("PUT", "/api/alerts", h_alerts)
+    r.add_post("/api/alerts/test", h_alerts_test)
+    r.add_get("/api/reports", h_reports)
+    r.add_get("/api/export.csv", h_export_csv)
+    r.add_get("/api/status", h_status)
+    r.add_post("/api/firmware/flashlink", h_flash_link)
+    r.add_get("/flash/{k}/manifest.json", h_flash_manifest)
+    r.add_get("/flash/{k}/fw.bin", h_flash_bin)
     r.add_post(r"/api/devices/{id:\d+}/apitoken", h_regen_api_token)
     r.add_post(r"/api/devices/{id:\d+}/ota", h_device_ota)
     r.add_get("/api/firmware", h_fw_list)

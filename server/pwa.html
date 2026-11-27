@@ -244,8 +244,10 @@ function offlineMode(){let devs=[];try{devs=JSON.parse(localStorage.getItem("vl_
 /* ---------- telas ---------- */
 const ICONS={home:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>',
   devs:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
-  acct:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>'};
-function renderNav(){const n=$("#nav");n.replaceChildren(...[["home","Início"],["devs","Dispositivos"],["acct","Conta"]].map(([k,l])=>
+  acct:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>',
+  gest:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>'};
+const MGR=()=>ME&&ME.role!=="operator";
+function renderNav(){const n=$("#nav");n.replaceChildren(...[["home","Início"],["devs","Dispositivos"],MGR()?["gest","Gestão"]:null,["acct","Conta"]].filter(Boolean).map(([k,l])=>
   el("button",{class:TAB===k?"on":"",onclick:()=>{TAB=k;render();window.scrollTo(0,0)}},el("span",{html:ICONS[k]}),l)))}
 
 function homeCard(d){const[s,pc]=stateOf(d);
@@ -260,9 +262,9 @@ function homeCard(d){const[s,pc]=stateOf(d);
       el("button",{class:d.armed?"on-lock":"",disabled:!d.online||!!d.armed,onclick:e=>cmd(d,"lock",e.currentTarget)},"🔒 Trancar"),
       el("button",{class:d.armed?"":"on-unlock",disabled:!d.online||!d.armed||!!d.blocked,onclick:e=>cmd(d,"unlock",e.currentTarget)},"🔓 Destrancar")),
     el("button",{class:"full "+(d.blocked?"bad":""),style:"margin-top:8px",onclick:e=>setBlocked(d,!d.blocked,e.currentTarget)},d.blocked?"🚫 Bloqueada · tocar para desbloquear":"Bloquear aberturas (loja fechada)"),
-    el("div",{class:"actions",style:"grid-template-columns:1fr 1fr"},
+    el("div",{class:"actions",style:"grid-template-columns:"+(MGR()?"1fr 1fr":"1fr")},
       el("button",{onclick:()=>openDevice(d.id,"log")},"Registros"),
-      el("button",{onclick:()=>openDevice(d.id,"ajustes")},"Ajustes")),
+      MGR()?el("button",{onclick:()=>openDevice(d.id,"ajustes")},"Ajustes"):null),
     d.online?null:el("div",{class:"banner b-info"},"Sem internet no local? Na mesma rede Wi-Fi da porta abra o controle direto (PIN "+d.pin+"):",localLinks(d)))}
 
 function devRow(d){const[s,,dc]=stateOf(d);
@@ -273,26 +275,21 @@ function devRow(d){const[s,,dc]=stateOf(d);
     el("span",{class:"chev"},"›"))}
 
 function acct(){
-  const masked=ME.secret.slice(0,4)+"…"+ME.secret.slice(-4);
+  const masked=ME.secret?ME.secret.slice(0,4)+"…"+ME.secret.slice(-4):"";
   const pw=el("form",{class:"card"},el("b",{},"Alterar senha"),el("label",{class:"f"},"Senha atual"),el("input",{name:"old",type:"password",required:true}),
     el("label",{class:"f"},"Nova senha"),el("input",{name:"new",type:"password",minlength:6,required:true}),el("button",{class:"acc full",style:"margin-top:12px"},"Salvar senha"));
   pw.onsubmit=async e=>{e.preventDefault();const F=new FormData(pw);try{await api("POST","/api/me/password",{old:F.get("old"),new:F.get("new")});pw.reset();toast("Senha alterada")}catch(err){toast(err.message)}};
   const out=[
     el("div",{class:"section-title"},"Perfil"),
-    el("div",{class:"card row between"},el("div",{},el("b",{},ME.username),el("div",{class:"small mut"},ME.is_admin?"Administrador":"Usuário")),
+    el("div",{class:"card row between"},el("div",{},el("b",{},ME.username),el("div",{class:"small mut"},{admin:"Administrador",owner:"Dono da conta",operator:"Operador (funcionário)"}[ME.role]||"Usuário")),
       el("span",{class:"pill "+(ws&&ws.readyState===1?"p-ok":"p-warn")},ws&&ws.readyState===1?"tempo real":"reconectando")),
     pw,
-    el("div",{class:"section-title"},"Dispositivos"),
-    el("div",{class:"card"},el("b",{},"Secret do ESP"),el("p",{class:"small mut"},"Fica gravado no firmware. Trocar exige regravar todos os ESPs por USB."),
+    MGR()?el("div",{class:"section-title"},"Dispositivos"):null,
+    !MGR()?null:el("div",{class:"card"},el("b",{},"Secret do ESP"),el("p",{class:"small mut"},"Fica gravado no firmware. Trocar exige regravar todos os ESPs por USB."),
       el("code",{},masked),el("div",{class:"row",style:"margin-top:10px"},
         el("button",{onclick:()=>copy(ME.secret)},"Copiar"),
         el("button",{class:"bad",onclick:async()=>{if(!confirm("Gerar novo secret? TODOS os ESPs param de conectar até serem regravados por USB. Só faça isso se o secret vazou."))return;try{ME.secret=(await api("POST","/api/me/secret")).secret;render();toast("Novo secret gerado")}catch(e){toast(e.message)}}},"Gerar novo")))];
-  if(ME.is_admin){out.push(fwCard());
-    const nu=el("form",{class:"card"},el("b",{},"Criar usuário"),el("label",{class:"f"},"Usuário"),el("input",{name:"u",autocapitalize:"none",required:true}),
-      el("label",{class:"f"},"Senha"),el("input",{name:"p",type:"password",minlength:6,required:true}),
-      el("label",{class:"check"},el("input",{name:"a",type:"checkbox"}),"Administrador"),el("button",{class:"acc full",style:"margin-top:12px"},"Criar"));
-    nu.onsubmit=async e=>{e.preventDefault();const F=new FormData(nu);try{await api("POST","/api/users",{username:F.get("u"),password:F.get("p"),is_admin:F.get("a")==="on"});nu.reset();toast("Usuário criado")}catch(err){toast(err.message)}};
-    out.push(nu)}
+  if(ME.is_admin)out.push(fwCard());
   out.push(el("button",{class:"bad full big",style:"margin-top:18px",onclick:logout},"Sair da conta"));
   return out}
 
@@ -312,10 +309,133 @@ function fwCard(){const info=el("div",{},el("span",{class:"spin"})),inp=el("inpu
   const b=el("button",{class:"acc full",style:"margin-top:10px",onclick:async()=>{const f=inp.files[0];if(!f)return toast("Escolha o arquivo .bin");if(!confirm(`Publicar ${f.name}? Os ESPs com atualização automática vão instalar.`))return;b.disabled=true;
     try{const r=await fetch("/api/firmware",{method:"POST",headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/octet-stream"},body:f});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("Erro "+r.status));toast(`v${d.version} publicado · enviado para ${d.sent} ESP(s)`);render()}catch(e){toast(e.message)}finally{b.disabled=false}}},"Publicar .bin manualmente");
   return el("div",{class:"card"},el("b",{},"Firmware dos ESPs"),
+    el("button",{class:"acc full",style:"margin:10px 0",onclick:openFlasher},"⚡ Gravar ESP novo pelo navegador"),
     el("p",{class:"small mut"},"Marque um dispositivo como 'de teste' (Ajustes): cada versão nova vai primeiro só para ele. Confira e toque em 'Liberar para todos'. Se der problema, 'Voltar para esta versão' numa versão anterior."),
     info,el("p",{class:"small mut",style:"margin-top:14px"},"Envio manual de .bin do Arduino IDE (normalmente a VPS compila sozinha):"),inp,b)}
 
 const _rc=Element.prototype.replaceChildren;Element.prototype.replaceChildren=function(...k){return _rc.apply(this,k.flat().filter(x=>x!=null&&x!==false))};
+/* ---------- Gestão ---------- */
+let GTAB="agenda";const DAYS=["seg","ter","qua","qui","sex","sáb","dom"];
+const ACTL={block:"🚫 Bloquear aberturas",unblock:"✓ Desbloquear",lock:"🔒 Trancar",unlock:"🔓 Destrancar"};
+function gestView(){const body=el("div",{});
+  const tabs=chips([["agenda","Agenda"],["alertas","Alertas"],["relatorios","Relatórios"],["usuarios","Usuários"],["saude","Saúde"]],GTAB,k=>{GTAB=k;render()},"tabs2");
+  body.append(tabs,el("div",{style:"margin-top:12px"},{agenda:agendaView,alertas:alertsView,relatorios:reportsView,usuarios:usersView,saude:healthView}[GTAB]()));
+  return body}
+function loading(){return el("div",{class:"empty"},el("span",{class:"spin"}))}
+
+function agendaView(){const box=el("div",{},loading());
+  api("GET","/api/schedules").then(r=>{
+    const sel=el("select",{name:"device"},el("option",{value:""},"Todas as portas"),[...DEV.values()].map(d=>el("option",{value:d.id},d.name)));
+    const dayBox=el("div",{class:"row wrap",style:"margin-top:6px"},DAYS.map((n,i)=>el("label",{class:"check",style:"margin:0 8px 0 0"},el("input",{type:"checkbox",name:"d"+i,checked:true}),n)));
+    const f=el("form",{class:"card"},el("b",{},"Novo agendamento"),
+      el("label",{class:"f"},"Ação"),el("select",{name:"action"},Object.entries(ACTL).map(([k,l])=>el("option",{value:k},l))),
+      el("label",{class:"f"},"Horário"),el("input",{name:"hhmm",type:"time",required:true,value:"22:00"}),
+      el("label",{class:"f"},"Portas"),sel,el("label",{class:"f"},"Dias"),dayBox,
+      el("button",{class:"acc full",style:"margin-top:14px"},"Adicionar"));
+    f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const days=DAYS.map((_,i)=>F.get("d"+i)==="on"?i:-1).filter(i=>i>=0);
+      if(!days.length)return toast("Escolha pelo menos um dia");
+      try{await api("POST","/api/schedules",{action:F.get("action"),hhmm:F.get("hhmm"),days,device_id:F.get("device")?+F.get("device"):null});toast("Agendamento criado");render()}catch(err){toast(err.message)}};
+    const list=r.schedules.length?el("div",{class:"card list"},r.schedules.map(sc=>el("div",{class:"item",style:"cursor:default"},
+      el("div",{class:"grow",style:"min-width:0"},el("div",{style:"font-weight:700;font-size:17px"},sc.hhmm+" · "+ACTL[sc.action]),
+        el("div",{class:"small mut"},(sc.device_name||"Todas as portas")+" · "+(sc.days_list.length===7?"todos os dias":sc.days_list.map(i=>DAYS[i]).join(", ")))),
+      el("button",{class:sc.enabled?"acc":"",onclick:async()=>{try{await api("PATCH","/api/schedules/"+sc.id,{enabled:!sc.enabled});render()}catch(e){toast(e.message)}}},sc.enabled?"Ativo":"Pausado"),
+      el("button",{class:"ghost",onclick:async()=>{if(!confirm("Apagar este agendamento?"))return;try{await api("DELETE","/api/schedules/"+sc.id);render()}catch(e){toast(e.message)}}},"✕")))):el("div",{class:"card empty"},"Nenhum agendamento. Ex.: bloquear às 22:00 e desbloquear às 08:00.");
+    box.replaceChildren(el("p",{class:"small mut",style:"margin-top:0"},"Horário de Brasília. Se o servidor estiver fora no minuto exato, executa assim que voltar (até 10 min depois)."),list,f)
+  }).catch(e=>box.replaceChildren(el("div",{class:"card empty"},e.message)));return box}
+
+function alertsView(){const box=el("div",{},loading());
+  api("GET","/api/alerts").then(a=>{const c=a.cfg;
+    const f=el("form",{},
+      el("div",{class:"card"},el("b",{},"1. Telegram"),
+        el("p",{class:"small mut"},"No Telegram: fale com @BotFather → /newbot → copie o token. Depois abra o seu bot e envie /start. Para o chat id, fale com @userinfobot (número que ele responder). Para um grupo, adicione o bot no grupo e use o id do grupo (começa com -100)."),
+        el("label",{class:"f"},"Token do bot"),el("input",{name:"tok",autocomplete:"off",placeholder:a.telegram_token_set?"configurado (…"+a.telegram_token_hint+") — deixe vazio para manter":"123456789:AA…"}),
+        el("label",{class:"f"},"Chat id"),el("input",{name:"chat",value:a.telegram_chat,inputmode:"numeric",placeholder:"123456789"})),
+      el("div",{class:"card"},el("b",{},"2. O que avisar"),
+        el("label",{class:"check"},el("input",{type:"checkbox",name:"off_on",checked:true,disabled:true}),el("span",{},"Porta offline há mais de ",el("input",{name:"offline_min",type:"number",min:1,max:1440,value:c.offline_min,style:"width:80px;display:inline;padding:6px"})," min (e quando voltar)")),
+        el("label",{class:"check"},el("input",{type:"checkbox",name:"unl_on",checked:true,disabled:true}),el("span",{},"Destrancada há mais de ",el("input",{name:"unlocked_min",type:"number",min:1,max:1440,value:c.unlocked_min,style:"width:80px;display:inline;padding:6px"})," min")),
+        ...[["refused","Abertura recusada (porta bloqueada)"],["ota_fail","Falha na atualização de firmware"],["memory","Memória baixa no ESP"],["reboot","ESP reiniciou sozinho (travamento)"],["server","Problema no servidor (disco, backup)"]].map(([k,l])=>el("label",{class:"check"},el("input",{type:"checkbox",name:k,checked:!!c[k]}),l))),
+      el("button",{class:"acc full big"},"Salvar alertas"),el("div",{class:"small",id:"alMsg",style:"margin-top:8px;text-align:center"}),
+      el("button",{type:"button",class:"full",style:"margin-top:8px",onclick:async()=>{try{await api("POST","/api/alerts/test");toast("Mensagem de teste enviada")}catch(e){toast(e.message)}}},"Enviar mensagem de teste"));
+    f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const m=$("#alMsg");
+      const b={telegram_chat:F.get("chat"),cfg:{offline_min:+F.get("offline_min"),unlocked_min:+F.get("unlocked_min"),refused:F.get("refused")==="on",ota_fail:F.get("ota_fail")==="on",memory:F.get("memory")==="on",reboot:F.get("reboot")==="on",server:F.get("server")==="on"}};
+      if(F.get("tok"))b.telegram_token=F.get("tok");
+      try{await api("PUT","/api/alerts",b);m.style.color="var(--ok)";m.textContent="✓ Salvo. Toque em 'Enviar mensagem de teste' para conferir."}catch(err){m.style.color="var(--bad)";m.textContent="✗ "+err.message}};
+    box.replaceChildren(f)}).catch(e=>box.replaceChildren(el("div",{class:"card empty"},e.message)));return box}
+
+let RPERIOD="7d";
+function reportsView(){const box=el("div",{});const res=el("div",{},loading());
+  box.append(chips(PERIODS,RPERIOD,k=>{RPERIOD=k;render()}),
+    el("div",{class:"row",style:"margin:10px 0"},el("button",{class:"acc",onclick:exportCsv},"⬇ Exportar registros (CSV)")),res);
+  api("GET","/api/reports?"+qs(range(RPERIOD))).then(r=>{
+    res.replaceChildren(...(r.devices.length?r.devices.map(d=>el("div",{class:"card"},
+      el("div",{class:"row between"},el("b",{},d.name),el("span",{class:"pill "+(d.availability>=99?"p-ok":d.availability>=95?"p-warn":"p-bad")},d.availability.toFixed(d.availability>=99.9?1:2)+"% online")),
+      el("div",{class:"stat",style:"margin:12px 0 6px"},el("div",{class:"card"},el("b",{},d.releases_total),el("span",{},"liberações")),el("div",{class:"card"},el("b",{},d.refused),el("span",{},"recusadas")),el("div",{class:"card"},el("b",{},d.outages),el("span",{},"quedas"))),
+      el("div",{class:"small mut"},`Sistema ${d.releases.sistema} · App ${d.releases.app} · Botão ${d.releases.botao} · Local ${d.releases.local}${d.releases.agenda?" · Agenda "+d.releases.agenda:""} · Trancou ${d.locks} · Destrancou ${d.unlocks}`),
+      d.offline_s?el("div",{class:"small mut"},"Tempo offline: "+dur(d.offline_s)):null,
+      d.releases.app>0&&d.releases.sistema>0&&d.releases.app>d.releases.sistema?el("div",{class:"banner b-warn"},"Mais liberações pelo app do que pelo sistema neste período: vale conferir com as vendas."):null)):
+      [el("div",{class:"card empty"},"Sem dispositivos.")]))}).catch(e=>res.replaceChildren(el("div",{class:"card empty"},e.message)));
+  return box}
+async function exportCsv(){try{const r=await fetch("/api/export.csv?"+qs(range(RPERIOD)),{headers:{"Authorization":"Bearer "+TOK}});if(!r.ok)throw new Error("Erro "+r.status);
+  const b=await r.blob();const a=el("a",{href:URL.createObjectURL(b),download:(r.headers.get("Content-Disposition")||"").split('filename="')[1]?.replace('"',"")||"registros.csv"});document.body.append(a);a.click();a.remove();toast("CSV baixado")}catch(e){toast(e.message)}}
+
+function usersView(){const box=el("div",{},loading());
+  api("GET","/api/users").then(r=>{const devs=[...DEV.values()];
+    const devChecks=(sel=[])=>el("div",{},devs.map(d=>el("label",{class:"check"},el("input",{type:"checkbox",name:"dev"+d.id,checked:sel.includes(d.id)}),d.name)));
+    const pick=F=>devs.filter(d=>F.get("dev"+d.id)==="on").map(d=>d.id);
+    const f=el("form",{class:"card"},el("b",{},"Novo usuário"),
+      el("p",{class:"small mut"},"Operador (funcionário): vê e comanda só as portas marcadas. Não acessa Ajustes, Integração, Gestão nem o secret."),
+      el("label",{class:"f"},"Usuário"),el("input",{name:"u",autocapitalize:"none",required:true,placeholder:"ex.: carla.mercado"}),
+      el("label",{class:"f"},"Senha"),el("input",{name:"p",type:"password",minlength:6,required:true}),
+      ME.is_admin?el("label",{class:"f"},"Tipo"):null,ME.is_admin?el("select",{name:"role"},el("option",{value:"operator"},"Operador (funcionário)"),el("option",{value:"owner"},"Dono de conta (cliente com ESPs próprios)"),el("option",{value:"admin"},"Administrador")):null,
+      el("label",{class:"f"},"Portas que ele pode usar"),devChecks(),
+      el("button",{class:"acc full",style:"margin-top:12px"},"Criar"));
+    f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);try{await api("POST","/api/users",{username:F.get("u"),password:F.get("p"),role:F.get("role")||"operator",devices:pick(F)});toast("Usuário criado");render()}catch(err){toast(err.message)}};
+    const roleL={admin:"Administrador",owner:"Dono de conta",operator:"Operador"};
+    const list=r.users.length?el("div",{class:"card list"},r.users.map(u=>el("div",{class:"item",onclick:()=>editUser(u,devs,devChecks,pick)},
+      el("div",{class:"grow",style:"min-width:0"},el("div",{style:"font-weight:600"},u.username),
+        el("div",{class:"small mut"},roleL[u.role]+(u.role==="operator"?" · "+(u.devices.length?u.devices.map(i=>(DEV.get(i)||{}).name||"#"+i).join(", "):"nenhuma porta"):""))),
+      el("span",{class:"chev"},"›")))):el("div",{class:"card empty"},"Nenhum usuário além de você.");
+    box.replaceChildren(list,f)}).catch(e=>box.replaceChildren(el("div",{class:"card empty"},e.message)));return box}
+function editUser(u,devs,devChecks,pick){
+  const f=el("form",{},u.role==="operator"?el("div",{},el("div",{class:"section-title",style:"margin-top:0"},"Portas"),devChecks(u.devices)):null,
+    el("div",{class:"section-title"},"Nova senha (opcional)"),el("input",{name:"p",type:"password",minlength:6,placeholder:"deixe vazio para manter"}),
+    el("button",{class:"acc full big",style:"margin-top:14px"},"Salvar"),
+    el("button",{type:"button",class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm(`Remover o usuário ${u.username}?`))return;try{await api("DELETE","/api/users/"+u.id);closeSheet();render()}catch(e){toast(e.message)}}},"Remover usuário"));
+  f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const b={};if(u.role==="operator")b.devices=pick(F);if(F.get("p"))b.password=F.get("p");
+    try{await api("PATCH","/api/users/"+u.id,b);toast("Salvo");closeSheet();render()}catch(err){toast(err.message)}};
+  SHEET={type:"user"};openSheet(u.username,{admin:"Administrador",owner:"Dono de conta",operator:"Operador"}[u.role],null,f)}
+
+function healthView(){const box=el("div",{},loading());
+  api("GET","/api/status").then(s=>{const row=(k,v,bad)=>el("div",{class:"row between",style:"padding:8px 0;border-bottom:1px solid var(--bd)"},el("span",{class:"mut"},k),el("b",{style:bad?"color:var(--bad)":""},v));
+    box.replaceChildren(
+      s.problems.length?el("div",{class:"banner b-warn",style:"margin:0 0 12px"},"⚠ "+s.problems.map(p=>p.msg).join(" · ")):el("div",{class:"banner",style:"margin:0 0 12px;background:var(--ok-bg);color:var(--ok)"},"✓ Tudo certo no servidor"),
+      el("div",{class:"card"},row("Versão do servidor",s.version),row("Servidor ligado há",dur(s.uptime_s)),row("Portas online",`${s.online} de ${s.devices}`),
+        row("Disco livre",`${s.disk_free_gb} GB (${s.disk_free_pct}%)`,s.disk_free_pct<10),row("Banco de dados",s.db_mb+" MB"),
+        row("Último backup",s.last_backup?new Date(s.last_backup*1000).toLocaleString("pt-BR"):"ainda não rodou",!s.last_backup),
+        row("Menor memória entre os ESPs",s.lowest_heap?(s.lowest_heap/1024).toFixed(1)+" KB":"—",s.lowest_heap&&s.lowest_heap<6000)),
+      el("div",{class:"card"},el("b",{},"Aviso se o servidor cair"),
+        el("p",{class:"small mut"},"Se a VPS sair do ar, ela mesma não consegue avisar. Use um monitor externo gratuito: crie conta no UptimeRobot (uptimerobot.com) → Add New Monitor → tipo Keyword → URL abaixo → palavra-chave \"ok\" → intervalo 5 min → alerta por e-mail ou Telegram."),
+        el("code",{},location.origin+"/health"),el("button",{style:"margin-top:8px",onclick:()=>copy(location.origin+"/health")},"Copiar URL")))
+  }).catch(e=>box.replaceChildren(el("div",{class:"card empty"},e.message)));return box}
+
+/* ---------- gravação pelo navegador ---------- */
+async function openFlasher(){
+  const body=el("div",{});SHEET={type:"flash"};openSheet("Gravar ESP novo","Chrome ou Edge no computador, cabo USB",null,body);
+  if(!("serial" in navigator)){body.append(el("div",{class:"banner b-warn"},"Este navegador não acessa a porta USB. Abra este app no Chrome ou no Edge de um computador (Windows ou Mac). No iPhone não funciona."));return}
+  body.append(loading());
+  try{const r=await api("POST","/api/firmware/flashlink");
+    if(!customElements.get("esp-web-install-button")){await new Promise((ok,bad)=>{const s=document.createElement("script");s.type="module";s.src="https://unpkg.com/esp-web-tools@10.5.1/dist/web/install-button.js?module";s.onload=ok;s.onerror=()=>bad(new Error("não foi possível carregar o gravador"));document.head.append(s)})}
+    const btn=document.createElement("esp-web-install-button");btn.setAttribute("manifest",r.manifest);
+    btn.append(Object.assign(document.createElement("button"),{slot:"activate",className:"acc full big",textContent:"⚡ Conectar e gravar v"+r.version}));
+    body.replaceChildren(
+      el("ol",{class:"small",style:"padding-left:18px;line-height:1.7"},
+        el("li",{},"Coloque o ESP-01S no adaptador USB em modo PROG e ligue no computador."),
+        el("li",{},"Toque no botão abaixo e escolha a porta (CH340 / USB-Serial)."),
+        el("li",{},"Quando perguntar, marque \"Apagar o dispositivo\" (Erase): deixa a memória no formato certo."),
+        el("li",{},"Espere terminar (~1 min). Volte o ESP para a placa do relé e configure pelo Wi-Fi VENUE_Lock-…")),
+      btn,el("p",{class:"small mut"},"O firmware já vai com o secret e a senha do portal. O link vale 15 minutos."))}
+  catch(e){body.replaceChildren(el("div",{class:"banner b-warn"},e.message))}}
+
 function render(){if(!ME)return;renderNav();
   const list=[...DEV.values()].sort((a,b)=>a.name.localeCompare(b.name,"pt-BR"));const on=list.filter(d=>d.online).length;
   if(TAB==="home"){$("#hT").textContent="Início";$("#hS").textContent=`${on} de ${list.length} online`;
@@ -331,7 +451,8 @@ function render(){if(!ME)return;renderNav();
     $("#main").replaceChildren(
       el("div",{class:"row wrap",style:"margin-bottom:12px"},el("button",{class:"acc",onclick:()=>openOutages()},"Quedas"),el("button",{onclick:load},"Atualizar")),
       list.length?el("div",{class:"card list"},list.map(devRow)):el("div",{class:"card empty"},"Nenhum dispositivo."))}
-  else{$("#hT").textContent="Conta";$("#hS").textContent="Perfil, firmware e usuários";$("#main").replaceChildren(...acct())}}
+  else if(TAB==="gest"&&MGR()){$("#hT").textContent="Gestão";$("#hS").textContent="Agenda, alertas, relatórios, usuários e saúde";$("#main").replaceChildren(gestView())}
+  else{TAB="acct";$("#hT").textContent="Conta";$("#hS").textContent="Perfil e firmware";$("#main").replaceChildren(...acct())}}
 
 /* ---------- sheet ---------- */
 function openSheet(title,sub,tabs,body){$("#shT").textContent=title;$("#shS").textContent=sub||"";$("#shTabs").replaceChildren(...(tabs?[tabs]:[]));$("#shB").replaceChildren(body);$("#shB").scrollTop=0;const s=$("#sheet");if(!s.open)s.showModal()}
@@ -342,7 +463,8 @@ function chips(opts,cur,onPick,cls=""){return el("div",{class:"seg "+cls},opts.m
 
 function openDevice(id,tab){const d=DEV.get(id);if(!d)return;SHEET={type:"dev",id,tab,period:SHEET&&SHEET.period||"hoje",cat:SHEET&&SHEET.cat||""};drawDevice()}
 function drawDevice(){const d=DEV.get(SHEET.id);if(!d)return closeSheet();const[s]=stateOf(d);
-  const tabs=chips([["log","Registros"],["ajustes","Ajustes"],["integracao","Integração"]],SHEET.tab,k=>{SHEET.tab=k;drawDevice()},"tabs2");
+  if(!MGR())SHEET.tab="log";
+  const tabs=MGR()?chips([["log","Registros"],["ajustes","Ajustes"],["integracao","Integração"]],SHEET.tab,k=>{SHEET.tab=k;drawDevice()},"tabs2"):null;
   const body=SHEET.tab==="log"?logView(d):SHEET.tab==="ajustes"?settingsView(d):integrationView(d);
   openSheet(d.name,`${s} · ${d.uuid}`,tabs,body)}
 
@@ -431,7 +553,7 @@ function connectWS(){clearTimeout(wsT);if(ws){ws.onclose=null;ws.close()}
   ws=new WebSocket(`${location.protocol==="https:"?"wss":"ws"}://${location.host}/ws/ui?s=${encodeURIComponent(TOK)}`);
   ws.onopen=()=>setLive(true);
   ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==="snapshot"){DEV.clear();m.devices.forEach(d=>DEV.set(d.id,d))}else if(m.type==="device")DEV.set(m.device.id,m.device);else if(m.type==="removed")DEV.delete(m.id);
-    saveOffline();if(TAB!=="acct")render();
+    saveOffline();if(TAB==="home"||TAB==="devs")render();
     if(SHEET&&SHEET.type==="dev"&&m.type==="device"&&m.device.id===SHEET.id){const[s]=stateOf(m.device);$("#shS").textContent=`${s} · ${m.device.uuid}`}};
   ws.onclose=()=>{setLive(false);if(TOK)wsT=setTimeout(connectWS,3000)}}
 async function load(){const r=await api("GET","/api/devices");DEV.clear();r.devices.forEach(d=>DEV.set(d.id,d));saveOffline();render()}
@@ -442,7 +564,7 @@ function logout(){if(TOK)fetch("/api/logout",{method:"POST",headers:{"Authorizat
   if(ws){ws.onclose=null;ws.close();ws=null}clearTimeout(wsT);DEV.clear();if($("#sheet").open)closeSheet();start()}
 $("#fLogin").onsubmit=async e=>{e.preventDefault();try{TOK=(await api("POST","/api/login",{username:$("#lu").value.trim().toLowerCase(),password:$("#lp").value})).token;try{localStorage.setItem("vl_tok",TOK)}catch(err){}$("#lp").value="";start()}catch(err){toast(err.message)}};
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&TOK&&(!ws||ws.readyState>1))connectWS()});
-setInterval(()=>{if(TAB!=="acct"&&!document.hidden)render()},30000);
+setInterval(()=>{if((TAB==="home"||TAB==="devs")&&!document.hidden)render()},30000);
 if("serviceWorker" in navigator)navigator.serviceWorker.register("/sw.js").catch(()=>{});
 start();
 </script>

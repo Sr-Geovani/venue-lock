@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-RUN pip install --no-cache-dir 'aiohttp>=3.9,<4'
+RUN pip install --no-cache-dir 'aiohttp>=3.9,<4' tzdata
 WORKDIR /app
 COPY venuelock.py pwa.html ./
 ENV VENUELOCK_DB=/data/venuelock.db PYTHONUNBUFFERED=1
