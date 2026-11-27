@@ -65,6 +65,9 @@ nav.tabs button.on{background:var(--acc-bg);color:var(--acc)}
 .meta b{color:var(--fg);font-weight:600}
 .actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
 .actions button{font-size:13px;padding:10px 6px}
+.bulkbar{display:grid;grid-template-columns:auto 1fr 1fr 1fr;gap:6px;align-items:center;margin-bottom:12px;background:var(--s1);border:1px solid var(--bd);border-radius:14px;padding:6px 6px 6px 12px}
+.bulkbar button{font-size:12px;padding:8px 4px;border-radius:10px;background:var(--s2);white-space:nowrap}
+.bulkbar button.warnb{color:var(--bad)}
 .lockseg{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:8px;background:var(--s2);border:1px solid var(--bd);border-radius:12px;padding:3px}
 .lockseg button{background:transparent;font-size:14px;padding:10px 6px;border-radius:9px}
 .lockseg button:disabled{opacity:1;color:var(--mut)}
@@ -303,9 +306,10 @@ function render(){if(!ME)return;renderNav();
     const free=list.filter(d=>d.online&&d.free).length;
     $("#main").replaceChildren(
       el("div",{class:"stat"},el("div",{class:"card"},el("b",{},on),el("span",{},"online")),el("div",{class:"card"},el("b",{},list.length-on),el("span",{},"offline")),el("div",{class:"card"},el("b",{},free),el("span",{},"em queda"))),
-      list.length?el("div",{class:"card",style:"margin-bottom:12px"},el("div",{class:"row between wrap"},el("div",{},el("b",{},list.length>1?"Todas as portas":"Comando geral"),el("div",{class:"small mut"},"Vale para todas as portas online da conta")),
-        el("div",{class:"row wrap"},el("button",{class:"acc",disabled:!on,onclick:e=>bulk("lock",e.currentTarget)},"🔒 Trancar todas"),el("button",{class:"bad",disabled:!on,onclick:e=>bulk("unlock",e.currentTarget)},"Destrancar todas"),
-          list.some(d=>!d.blocked)?el("button",{class:"bad",onclick:e=>bulk("block",e.currentTarget)},"🚫 Bloquear todas"):el("button",{onclick:e=>bulk("unblock",e.currentTarget)},"Desbloquear todas")))):null,
+      list.length?el("div",{class:"bulkbar"},el("span",{class:"small mut"},list.length>1?"Todas:":"Geral:"),
+        el("button",{disabled:!on,onclick:e=>bulk("lock",e.currentTarget)},"🔒 Trancar"),
+        el("button",{disabled:!on,onclick:e=>bulk("unlock",e.currentTarget)},"🔓 Destrancar"),
+        list.some(d=>!d.blocked)?el("button",{class:"warnb",onclick:e=>bulk("block",e.currentTarget)},"🚫 Bloquear"):el("button",{onclick:e=>bulk("unblock",e.currentTarget)},"✓ Desbloquear")):null,
       list.length?el("div",{class:"grid"},list.map(homeCard)):el("div",{class:"card empty"},"Nenhum dispositivo ainda. Grave um ESP e ele aparece aqui sozinho."))}
   else if(TAB==="devs"){$("#hT").textContent="Dispositivos";$("#hS").textContent=`${on} de ${list.length} online`;
     $("#main").replaceChildren(
