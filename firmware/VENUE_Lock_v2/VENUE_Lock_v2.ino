@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.8"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.9"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -517,6 +517,7 @@ button,input{font:inherit;width:100%;border:0;border-radius:14px;padding:15px;ma
 <label class="m" style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" style="width:auto;margin:0" onchange="$('pin').type=this.checked?'text':'password'">mostrar PIN</label><button class="a" onclick="login()">Entrar</button></div>
 <div class="c h" id="ap"><div class="m">Estado</div><div class="s" id="st">—</div><div class="m" id="inf"></div>
 <button class="a" onclick="act('release')">Liberar porta</button><button onclick="act('lock')">Trancar</button><button onclick="act('unlock')">Destrancar</button>
+<a id="cfg" href="/config" class="h"><button>⚙ Configurar Wi-Fi (administrador)</button></a>
 <button onclick="localStorage.removeItem('vlpin');location.reload()">Sair</button></div><div class="m" id="msg"></div>
 <script>)HTML";
 
@@ -527,7 +528,7 @@ let BUSY=false;
 async function act(a,retry){if(BUSY&&!retry)return false;BUSY=true;document.querySelectorAll("#ap button").forEach(b=>b.disabled=true);$("msg").textContent="Enviando…";
 try{const n=(await(await fetch("/l/nonce")).json()).n;const b=new URLSearchParams({a,n,m:hmac(PIN,"loc|"+n+"|"+a)});
 const r=await fetch("/l/cmd",{method:"POST",body:b});const d=await r.json();if(!r.ok&&d.e=="nonce"&&!retry){BUSY=false;return act(a,1)}if(!r.ok){$("msg").textContent=d.e=="bloqueado"?"Porta BLOQUEADA no app: aberturas desativadas":(d.e||"erro");if(r.status==401&&d.e=="pin"){PIN="";show(false)}return false}
-show(true);$("nm").textContent=d.name;$("st").textContent=d.blk?"BLOQUEADO":d.free?"LIVRE (queda)":d.relay?"TRANCADO":(d.armed?"LIBERANDO":"DESTRANCADO");
+show(true);$("nm").textContent=d.name;$("cfg").className=d.ap?"":"h";$("st").textContent=d.blk?"BLOQUEADO":d.free?"LIVRE (queda)":d.relay?"TRANCADO":(d.armed?"LIBERANDO":"DESTRANCADO");
 $("inf").textContent=(d.online?"Servidor online":"Servidor offline")+" · liberação "+d.rel/1000+"s";$("msg").textContent=a=="release"?"Liberado":"";
 if(a=="release")setTimeout(()=>act("status"),d.rel+400);return true}catch(e){$("msg").textContent="Sem resposta do dispositivo. Tente de novo."}
 finally{BUSY=false;document.querySelectorAll("#ap button").forEach(b=>b.disabled=false)}}
@@ -583,6 +584,7 @@ void localStatusJson(String& out) {
   JsonDocument d;
   d["name"] = cfg.name; d["armed"] = (bool)cfg.armed; d["relay"] = relayOn; d["free"] = offlineFree;
   d["online"] = wsAuthed; d["rel"] = cfg.releaseMs; d["blk"] = (bool)cfg.blocked;
+  d["ap"] = apFallback && viaSoftAP();
   serializeJson(d, out);
 }
 
@@ -651,7 +653,7 @@ button{font-weight:600}.a{background:#1d3a35;color:#4fd1b5}.d{background:#3a1f22
 <div class="m" id="aPin" style="margin-top:10px"></div>
 <button class="a" onclick="saveAdv()">Salvar avançado</button><button onclick="post('/p/exit',{}).then(()=>bye('Reiniciando…'))">Reiniciar ESP</button>
 <button class="d" onclick="factory()">Reset de fábrica</button><button onclick="show('vWifi')">Voltar</button></div>
-<div class="c"><button onclick="adv()">Configurações avançadas</button><button onclick="post('/p/exit',{}).then(()=>bye('Saindo sem alterar. O ESP volta ao normal.'))">Sair sem alterar</button></div>
+<div class="c"><button onclick="adv()">Configurações avançadas</button><button onclick="INFO.emerg?location.href='/':post('/p/exit',{}).then(()=>bye('Saindo sem alterar. O ESP volta ao normal.'))">Sair sem alterar</button></div>
 <div id="msg" class="m"></div>
 <script>
 const $=i=>document.getElementById(i);let INFO={},NETS=[];
@@ -662,6 +664,7 @@ function show(v){['vWifi','vPass','vSave','vLogin','vAdv'].forEach(x=>$(x).class
 function msg(t,bad){$('msg').textContent=t;$('msg').className=bad?'e':'ok'}
 function bye(t){document.body.innerHTML='<h1>VENUE Lock</h1><p>'+t+'</p><p class="m">Pode fechar esta página.</p>'}
 function bars(r){return r>-60?'▂▄▆█':r>-70?'▂▄▆':r>-80?'▂▄':'▂'}
+let AFTER='adv';
 async function info(){try{INFO=await j('/p/info');$('sub').textContent='fw '+INFO.fw+' · '+INFO.uuid+(INFO.ssid?' · rede atual: '+INFO.ssid:' · primeira instalação');$('uuid').value=INFO.uuid}catch(e){$('sub').textContent='sem resposta do ESP'}}
 async function scan(force){$('nets').textContent='Procurando redes…';for(let i=0;i<25;i++){let d={};try{d=await j('/p/scan'+(force&&!i?'?r=1':''))}catch(e){}
  if(d.nets){NETS=d.nets;render();return}await wait(800)}$('nets').textContent='Não foi possível listar as redes. Toque em Atualizar.'}
@@ -679,14 +682,14 @@ async function test(){const s=$('pSsid').value.trim(),p=$('pPass').value;if(!s){
  catch(e){$('tMsg').className='e';$('tMsg').textContent=e.message}finally{$('bTest').disabled=false}}
 async function save(){try{await post('/p/save',{uuid:$('uuid').value.trim().toLowerCase()});bye('Salvo! O ESP está reiniciando e vai conectar na rede escolhida. Em até 1 minuto ele aparece online no app.')}catch(e){msg(e.message,1)}}
 async function adv(){if(INFO.admin)return loadAdv();show('vLogin');$('lp').focus()}
-async function login(){try{await post('/p/login',{p:$('lp').value});$('lp').value='';INFO.admin=true;await loadAdv()}catch(e){msg(e.message,1)}}
+async function login(){try{await post('/p/login',{p:$('lp').value});$('lp').value='';INFO.admin=true;if(AFTER==='wifi'){AFTER='adv';show('vWifi');scan(0)}else await loadAdv()}catch(e){msg(e.message,1)}}
 async function loadAdv(){try{const a=await j('/p/adv');$('aUuid').value=a.uuid;$('aAh').value=a.ah;$('aRel').value=a.rel;$('aPol').value=a.pol;$('aGrace').value=a.grace;$('aEg').checked=!!a.eg;
  $('aPin').textContent='PIN local (Wi-Fi de emergência e acesso .local): '+(a.pin||'ainda não recebido do servidor');show('vAdv')}catch(e){INFO.admin=false;msg(e.message,1);show('vLogin')}}
 async function saveAdv(){try{await post('/p/adv',{uuid:$('aUuid').value.trim().toLowerCase(),ah:$('aAh').value,rel:$('aRel').value,pol:$('aPol').value,grace:$('aGrace').value,eg:$('aEg').checked?1:0});
  INFO.uuid=$('aUuid').value.trim().toLowerCase();msg('Salvo. Os ajustes sobem para o servidor quando o ESP reconectar.')}catch(e){msg(e.message,1)}}
 async function relayTest(){try{await post('/p/relay',{ah:$('aAh').value});msg('Relé acionado por 1,5 s: a fechadura deve TRAVAR e depois soltar. Se fez o contrário, troque a polaridade.')}catch(e){msg(e.message,1)}}
 async function factory(){if(!confirm('Apagar Wi-Fi, nome e ajustes deste ESP?'))return;try{await post('/p/factory',{});bye('Reset de fábrica feito. O ESP reinicia no modo de primeira instalação.')}catch(e){msg(e.message,1)}}
-info().then(()=>scan(0));
+info().then(()=>{if(INFO.emerg&&!INFO.admin){AFTER='wifi';show('vLogin');msg('Wi-Fi de emergência: entre com a senha de administrador para trocar a rede.')}else scan(0)});
 </script></body></html>)HTML";
 
 bool portalAuthed() {
@@ -730,16 +733,15 @@ void pInfo() {
   portalActivity = millis();
   JsonDocument d;
   d["fw"] = FW_VERSION; d["chip"] = String(ESP.getChipId(), HEX); d["uuid"] = cfg.uuid;
-  d["ssid"] = cfg.ssid; d["first"] = firstSetup; d["admin"] = portalAuthed();
+  d["ssid"] = cfg.ssid; d["first"] = firstSetup; d["admin"] = portalAuthed(); d["emerg"] = !portalMode;
   jsonReply(200, d);
 }
 
-void pScan() {
-  portalActivity = millis();
-  int n = WiFi.scanComplete();
-  if (web.hasArg("r") && n != WIFI_SCAN_RUNNING) { WiFi.scanDelete(); n = WIFI_SCAN_FAILED; }
-  if (n == WIFI_SCAN_FAILED) WiFi.scanNetworks(true, false);
-  if (n < 0) { JsonDocument d; d["scanning"] = true; return jsonReply(200, d); }
+// Lista de redes guardada: a busca é feita ANTES de abrir o AP, assim o canal não fica
+// pulando enquanto o celular conecta (era o que impedia a janela de login de abrir sozinha).
+String scanCache;
+
+void buildScanCache(int n) {
   // ordena por sinal e remove duplicadas (mesma rede em vários roteadores/repetidores)
   int idx[48]; int m = 0;
   for (int i = 0; i < n && m < 48; i++) if (WiFi.SSID(i).length()) idx[m++] = i;
@@ -754,6 +756,22 @@ void pScan() {
     JsonObject o = arr.add<JsonObject>();
     o["s"] = ss; o["r"] = WiFi.RSSI(idx[a]); o["e"] = WiFi.encryptionType(idx[a]) != ENC_TYPE_NONE;
   }
+  scanCache = "";
+  serializeJson(d, scanCache);
+  WiFi.scanDelete();
+}
+
+void pScan() {
+  portalActivity = millis();
+  if (web.hasArg("r")) {  // "Atualizar": nova busca (o celular pode cair 1-2 s)
+    if (WiFi.scanComplete() != WIFI_SCAN_RUNNING) { WiFi.scanDelete(); WiFi.scanNetworks(true, false); }
+    scanCache = "";
+  }
+  int n = WiFi.scanComplete();
+  if (!scanCache.length() && n >= 0) buildScanCache(n);
+  if (scanCache.length()) { sendNoCache(); web.send(200, F("application/json"), scanCache); return; }
+  if (n == WIFI_SCAN_FAILED) WiFi.scanNetworks(true, false);
+  JsonDocument d; d["scanning"] = true;
   jsonReply(200, d);
 }
 
@@ -879,6 +897,7 @@ void pAdvSave() {
 void pRelayTest() {
   portalActivity = millis();
   if (!requireAdmin()) return;
+  if (!portalMode) return jsonErr(409, "Teste do rele so pelo portal do botao (porta em uso)");
   relayTestAh = web.arg("ah") == "0" ? 0 : 1;
   digitalWrite(RELAY_GPIO, relayTestAh ? HIGH : LOW);  // energiza
   relayTestUntil = (millis() + 1500) | 1;
@@ -911,11 +930,13 @@ void startPortal() {
   wsAuthed = false;
   WiFi.setAutoReconnect(false);
   WiFi.disconnect(false);  // para tentativas antigas: mantém o AP estável
+  WiFi.mode(WIFI_STA);
+  buildScanCache(WiFi.scanNetworks(false, false));  // busca agora, antes do AP existir
   WiFi.mode(WIFI_AP_STA);
   char ap[33]; snprintf(ap, sizeof(ap), "VENUE_Lock-%06x", ESP.getChipId());
   WiFi.softAP(ap);  // aberto: só existe na primeira instalação ou com o botão físico
+  dns.setErrorReplyCode(DNSReplyCode::NoError);
   dns.start(53, "*", WiFi.softAPIP());
-  WiFi.scanNetworks(true, false);
   LOGF("[portal] AP %s em http://%s", ap, WiFi.softAPIP().toString().c_str());
   logEvent("portal", "botao");
 }
@@ -924,7 +945,9 @@ void startPortal() {
 void routeRoot() { portalMode ? pPage() : handleLocalPage(); }
 
 void routeNotFound() {
-  if (portalMode) {
+  // Qualquer endereço desconhecido no AP (portal ou emergência) leva à página: é isso que faz o
+  // iPhone e o Android abrirem a janela de login sozinhos (captive portal)
+  if (portalMode || (apFallback && viaSoftAP())) {
     web.sendHeader(F("Location"), String("http://") + WiFi.softAPIP().toString() + "/");
     web.send(302, F("text/plain"), "");
   } else {
@@ -932,17 +955,26 @@ void routeNotFound() {
   }
 }
 
-// rotas /p/* só existem com o portal aberto
-#define PORTAL_ONLY(fn) []() { if (portalMode) fn(); else web.send(403, F("text/plain"), F("403")); }
+bool viaSoftAP() { return web.client().localIP() == WiFi.softAPIP(); }
+// Configuração pelo Wi-Fi de emergência (VENUE-<nome>, senha = PIN): exige a senha de administrador
+bool emergencyConfig() { return !portalMode && apFallback && viaSoftAP(); }
+
+// rotas /p/*: portal do botão (livre) ou Wi-Fi de emergência (só depois do login de administrador)
+#define PORTAL_OPEN(fn) []() { if (portalMode || emergencyConfig()) fn(); else web.send(403, F("text/plain"), F("403")); }
+#define PORTAL_ONLY(fn) []() { \
+  if (portalMode) fn(); \
+  else if (emergencyConfig()) { if (portalAuthed()) fn(); else jsonErr(401, "Entre com a senha de administrador"); } \
+  else web.send(403, F("text/plain"), F("403")); }
 
 void setupWeb() {
   web.on("/", HTTP_GET, routeRoot);
-  web.on("/p/info", HTTP_GET, PORTAL_ONLY(pInfo));
+  web.on("/config", HTTP_GET, PORTAL_OPEN(pPage));
+  web.on("/p/info", HTTP_GET, PORTAL_OPEN(pInfo));
   web.on("/p/scan", HTTP_GET, PORTAL_ONLY(pScan));
   web.on("/p/wifi", HTTP_POST, PORTAL_ONLY(pWifiStart));
   web.on("/p/wifi", HTTP_GET, PORTAL_ONLY(pWifiStatus));
   web.on("/p/save", HTTP_POST, PORTAL_ONLY(pSave));
-  web.on("/p/login", HTTP_POST, PORTAL_ONLY(pLogin));
+  web.on("/p/login", HTTP_POST, PORTAL_OPEN(pLogin));
   web.on("/p/adv", HTTP_GET, PORTAL_ONLY(pAdvGet));
   web.on("/p/adv", HTTP_POST, PORTAL_ONLY(pAdvSave));
   web.on("/p/relay", HTTP_POST, PORTAL_ONLY(pRelayTest));
@@ -994,6 +1026,7 @@ void wifiTick() {
       if (WiFi.softAPgetStationNum() > 0) apIdleSince = 0;
       else if (!apIdleSince) apIdleSince = now;
       else if (now - apIdleSince > AP_IDLE_CLOSE_MS) {
+        dns.stop(); scanCache = "";
         WiFi.softAPdisconnect(true); WiFi.mode(WIFI_STA); apFallback = false;
         LOGF("[ap] emergência encerrado (Wi-Fi voltou)");
       }
@@ -1003,8 +1036,13 @@ void wifiTick() {
     if (!wifiDownSince) wifiDownSince = now ? now : 1;
     if (!apFallback && now - wifiDownSince > WIFI_AP_FALLBACK_MS && strlen(cfg.pin) >= 8) {
       String ap = String("VENUE-") + mdnsName();
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false);
+      buildScanCache(WiFi.scanNetworks(false, false));  // lista de redes pronta antes do AP existir
       WiFi.mode(WIFI_AP_STA);
       WiFi.softAP(ap.c_str(), cfg.pin);
+      dns.setErrorReplyCode(DNSReplyCode::NoError);
+      dns.start(53, "*", WiFi.softAPIP());
       apFallback = true; apIdleSince = 0;
       WiFi.setAutoReconnect(false);
       WiFi.disconnect(false);  // para a busca contínua: AP estável para o celular conectar
@@ -1018,7 +1056,7 @@ void wifiTick() {
           WiFi.disconnect(false);
           staTrying = false; staRetryAt = now + STA_RETRY_EVERY_MS;
         }
-      } else if (WiFi.softAPgetStationNum() == 0 && (int32_t)(now - staRetryAt) >= 0) {
+      } else if (tState != T_TEST && WiFi.softAPgetStationNum() == 0 && (int32_t)(now - staRetryAt) >= 0) {
         LOGF("[ap] tentando o roteador \"%s\" de novo", cfg.ssid);
         WiFi.begin(cfg.ssid, cfg.pass);
         staTrying = true; staTryStart = now;
@@ -1193,6 +1231,7 @@ void loop() {
   }
 
   wifiTick();
+  if (apFallback) { dns.processNextRequest(); wifiTestTick(); }
   if (mdnsUp) MDNS.update();
   if (!wsAuthed) {
     // Sem servidor: tentativas cada vez mais espaçadas (5 s -> 15 s -> 30 s)
