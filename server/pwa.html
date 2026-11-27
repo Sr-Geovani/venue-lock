@@ -65,6 +65,11 @@ nav.tabs button.on{background:var(--acc-bg);color:var(--acc)}
 .meta b{color:var(--fg);font-weight:600}
 .actions{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px}
 .actions button{font-size:13px;padding:10px 6px}
+.lockseg{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:8px;background:var(--s2);border:1px solid var(--bd);border-radius:12px;padding:3px}
+.lockseg button{background:transparent;font-size:14px;padding:10px 6px;border-radius:9px}
+.lockseg button:disabled{opacity:1;color:var(--mut)}
+.lockseg button.on-lock{background:var(--ok-bg);color:var(--ok)}.lockseg button.on-unlock{background:var(--warn-bg);color:var(--warn)}
+.lockseg button:not(:disabled){color:var(--fg)}
 .banner{border-radius:12px;padding:10px 12px;font-size:13px;margin-top:10px}
 .b-warn{background:var(--warn-bg);color:var(--warn)}.b-info{background:var(--info-bg);color:var(--info)}
 
@@ -241,9 +246,11 @@ function homeCard(d){const[s,pc]=stateOf(d);
       el("span",{},"Sinal ",el("b",{},signal(d.rssi))),
       el("span",{},d.online?"Online há ":"Visto há ",el("b",{},ago(d.online?d.online_since:d.last_seen))),
       el("span",{},"Liberação ",el("b",{},(d.release_ms/1000)+" s"))),
-    el("button",{class:"acc full big",disabled:!d.online,onclick:e=>cmd(d,"release",e.currentTarget)},"Liberar porta"),
-    el("div",{class:"actions"},
-      el("button",{disabled:!d.online,onclick:e=>cmd(d,d.armed?"unlock":"lock",e.currentTarget)},d.armed?"Destrancar":"Trancar"),
+    el("button",{class:"acc full big",disabled:!d.online,onclick:e=>cmd(d,"release",e.currentTarget)},"Liberar porta (",(d.release_ms/1000)+" s)"),
+    el("div",{class:"lockseg"},
+      el("button",{class:d.armed?"on-lock":"",disabled:!d.online||!!d.armed,onclick:e=>cmd(d,"lock",e.currentTarget)},"🔒 Trancar"),
+      el("button",{class:d.armed?"":"on-unlock",disabled:!d.online||!d.armed,onclick:e=>cmd(d,"unlock",e.currentTarget)},"🔓 Destrancar")),
+    el("div",{class:"actions",style:"grid-template-columns:1fr 1fr"},
       el("button",{onclick:()=>openDevice(d.id,"log")},"Registros"),
       el("button",{onclick:()=>openDevice(d.id,"ajustes")},"Ajustes")),
     d.online?null:el("div",{class:"banner b-info"},"Sem internet no local? Na mesma rede Wi-Fi da porta abra o controle direto (PIN "+d.pin+"):",localLinks(d)))}
