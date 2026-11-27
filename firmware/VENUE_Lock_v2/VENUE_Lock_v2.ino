@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.6"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.7"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -100,8 +100,17 @@ DNSServer dns;
 WebSocketsClient ws;
 
 uint8_t dkey[32];
-char serverNonce[33] = "", clientNonce[33] = "", localNonce[33] = "";
-uint32_t localNonceAt = 0, localLockUntil = 0;
+char serverNonce[33] = "", clientNonce[33] = "";
+// Até 4 desafios locais válidos ao mesmo tempo (duas abas/toques seguidos não se atropelam)
+static const uint8_t NONCE_SLOTS = 4;
+char localNonces[NONCE_SLOTS][33];
+uint32_t localNonceAts[NONCE_SLOTS];
+uint8_t localNonceNext = 0;
+uint32_t localLockUntil = 0;
+// Enquanto alguém usa a página local sem servidor, o ESP não tenta reconectar
+// (cada tentativa sem internet trava o ESP alguns segundos e a página para de responder)
+uint32_t localActiveUntil = 0;
+uint32_t wsRetryMs = 5000;
 uint8_t localFails = 0;
 bool wsAuthed = false;
 uint32_t lastQ = 0, lastLinkMs = 0, lastPingMs = 0;
@@ -503,17 +512,21 @@ static const char LOCAL_HTML[] PROGMEM = R"HTML(<!doctype html><html lang="pt-BR
 button,input{font:inherit;width:100%;border:0;border-radius:14px;padding:15px;margin-top:10px;background:#1e2430;color:#e9edf3;font-weight:600}
 .a{background:#1d3a35;color:#4fd1b5;font-size:20px}.s{font-size:26px;font-weight:700;margin:8px 0}.h{display:none}</style></head><body>
 <h1>VENUE Local</h1><div class="m" id="nm">Acesso direto, sem internet</div>
-<div class="c" id="lg"><div class="m">PIN do dispositivo</div><input id="pin" type="password" inputmode="numeric" autocomplete="off"><button class="a" onclick="login()">Entrar</button></div>
+<div class="c" id="lg"><div class="m">PIN do dispositivo</div><input id="pin" type="password" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+<label class="m" style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" style="width:auto;margin:0" onchange="$('pin').type=this.checked?'text':'password'">mostrar PIN</label><button class="a" onclick="login()">Entrar</button></div>
 <div class="c h" id="ap"><div class="m">Estado</div><div class="s" id="st">—</div><div class="m" id="inf"></div>
 <button class="a" onclick="act('release')">Liberar porta</button><button onclick="act('lock')">Trancar</button><button onclick="act('unlock')">Destrancar</button>
 <button onclick="localStorage.removeItem('vlpin');location.reload()">Sair</button></div><div class="m" id="msg"></div>
 <script>%SHA%
 const $=i=>document.getElementById(i);let PIN="";try{PIN=localStorage.getItem("vlpin")||""}catch(e){}
-async function act(a){try{const n=(await(await fetch("/l/nonce")).json()).n;const b=new URLSearchParams({a,n,m:hmac(PIN,"loc|"+n+"|"+a)});
-const r=await fetch("/l/cmd",{method:"POST",body:b});const d=await r.json();if(!r.ok){$("msg").textContent=d.e=="bloqueado"?"Porta BLOQUEADA no app: aberturas desativadas":(d.e||"erro");if(r.status==401&&d.e=="pin"){PIN="";show(false)}return false}
+let BUSY=false;
+async function act(a,retry){if(BUSY&&!retry)return false;BUSY=true;document.querySelectorAll("#ap button").forEach(b=>b.disabled=true);$("msg").textContent="Enviando…";
+try{const n=(await(await fetch("/l/nonce")).json()).n;const b=new URLSearchParams({a,n,m:hmac(PIN,"loc|"+n+"|"+a)});
+const r=await fetch("/l/cmd",{method:"POST",body:b});const d=await r.json();if(!r.ok&&d.e=="nonce"&&!retry){BUSY=false;return act(a,1)}if(!r.ok){$("msg").textContent=d.e=="bloqueado"?"Porta BLOQUEADA no app: aberturas desativadas":(d.e||"erro");if(r.status==401&&d.e=="pin"){PIN="";show(false)}return false}
 show(true);$("nm").textContent=d.name;$("st").textContent=d.blk?"BLOQUEADO":d.free?"LIVRE (queda)":d.relay?"TRANCADO":(d.armed?"LIBERANDO":"DESTRANCADO");
 $("inf").textContent=(d.online?"Servidor online":"Servidor offline")+" · liberação "+d.rel/1000+"s";$("msg").textContent=a=="release"?"Liberado":"";
-if(a=="release")setTimeout(()=>act("status"),d.rel+400);return true}catch(e){$("msg").textContent="Sem resposta do dispositivo"}}
+if(a=="release")setTimeout(()=>act("status"),d.rel+400);return true}catch(e){$("msg").textContent="Sem resposta do dispositivo. Tente de novo."}
+finally{BUSY=false;document.querySelectorAll("#ap button").forEach(b=>b.disabled=false)}}
 function show(on){$("lg").className=on?"c h":"c";$("ap").className=on?"c":"c h"}
 async function login(){PIN=$("pin").value.trim();if(await act("status")){try{localStorage.setItem("vlpin",PIN)}catch(e){}}}
 if(PIN)act("status");</script></body></html>)HTML";
@@ -528,7 +541,10 @@ function hmac(k,m){const e=new TextEncoder();k=e.encode(k);m=e.encode(m);if(k.le
 
 void sendNoCache() { web.sendHeader(F("Cache-Control"), F("no-store")); }
 
+void markLocalActive();
+
 void handleLocalPage() {
+  markLocalActive();
   String page = FPSTR(LOCAL_HTML);
   String sha = FPSTR(SHA_JS);
   page.replace("%SHA%", sha);
@@ -536,11 +552,25 @@ void handleLocalPage() {
   web.send(200, F("text/html"), page);
 }
 
+void markLocalActive() { localActiveUntil = (millis() + 120000) | 1; }
+
 void handleNonce() {
-  randomHex(localNonce);
-  localNonceAt = millis();
+  markLocalActive();
+  uint8_t i = localNonceNext++ % NONCE_SLOTS;
+  randomHex(localNonces[i]);
+  localNonceAts[i] = millis();
   sendNoCache();
-  web.send(200, F("application/json"), String("{\"n\":\"") + localNonce + "\"}");
+  web.send(200, F("application/json"), String("{\"n\":\"") + localNonces[i] + "\"}");
+}
+
+bool takeNonce(const String& n) {
+  for (uint8_t i = 0; i < NONCE_SLOTS; i++) {
+    if (localNonces[i][0] && n == localNonces[i] && millis() - localNonceAts[i] < NONCE_TTL_MS) {
+      localNonces[i][0] = 0;  // uso único
+      return true;
+    }
+  }
+  return false;
 }
 
 void localStatusJson(String& out) {
@@ -559,10 +589,9 @@ void handleLocalCmd() {
   if (localLockUntil && (int32_t)(millis() - localLockUntil) < 0) return localErr(429, "bloqueado_1min");
   localLockUntil = 0;
   if (strlen(cfg.pin) < 8) return localErr(503, "pin_nao_configurado");
+  markLocalActive();
   String a = web.arg("a"), n = web.arg("n"), m = web.arg("m");
-  bool nonceOk = localNonce[0] && n == localNonce && millis() - localNonceAt < NONCE_TTL_MS;
-  localNonce[0] = 0;  // uso único
-  if (!nonceOk) return localErr(401, "nonce");
+  if (!takeNonce(n)) return localErr(401, "nonce");
   String expect = hmacHex((const uint8_t*)cfg.pin, strlen(cfg.pin), String("loc|") + n + "|" + a);
   if (!ctEqual(expect, m)) {
     if (++localFails >= LOCAL_MAX_FAILS) { localFails = 0; localLockUntil = millis() + LOCAL_LOCKOUT_MS; logEvent("pin_bloq", "local"); }
@@ -1154,7 +1183,13 @@ void loop() {
 
   wifiTick();
   if (mdnsUp) MDNS.update();
-  ws.loop();
+  if (!wsAuthed) {
+    // Sem servidor: tentativas cada vez mais espaçadas (5 s -> 15 s -> 30 s)
+    uint32_t off = now - lastLinkMs, want = off < 60000 ? 5000 : off < 300000 ? 15000 : 30000;
+    if (want != wsRetryMs) { wsRetryMs = want; ws.setReconnectInterval(want); }
+  } else if (wsRetryMs != 5000) { wsRetryMs = 5000; ws.setReconnectInterval(5000); }
+  bool localPriority = !wsAuthed && localActiveUntil && (int32_t)(localActiveUntil - now) > 0;
+  if (!localPriority) ws.loop();  // alguém usando a página local: não trava o ESP tentando o servidor
   offlineTick();
 
   // OTA só com porta em repouso (sem pulso de liberação em andamento)
