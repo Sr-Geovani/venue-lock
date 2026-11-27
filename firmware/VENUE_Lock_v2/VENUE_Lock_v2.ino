@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.4"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.5"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -80,6 +80,7 @@ struct Config {
   uint8_t policy, armed, activeHigh, egress;
   uint16_t graceS, releaseMs;
   uint8_t lcfgDirty;      // ajuste feito no portal local ainda não enviado ao servidor
+  uint8_t blocked;        // modo bloqueado: recusa abrir (ocupa um byte de alinhamento: layout e CRC não mudam)
   uint32_t crc;
 } cfg;
 
@@ -334,6 +335,11 @@ void sendState() {
 // Retorna "" se ok, ou o motivo da recusa.
 String doAction(const String& a, const char* src) {
   if (portalMode) return "portal_ativo";
+  // Bloqueado: nenhum comando remoto/local abre. O botão físico de dentro continua (saída).
+  if (cfg.blocked && (a == "release" || a == "unlock") && strcmp(src, "botao") != 0) {
+    logEvent("recusado_blq", src, a.c_str());
+    return "bloqueado";
+  }
   if (a == "release") {
     pulseActive = true; pulseStart = millis();
     logEvent("release", src);
@@ -383,6 +389,12 @@ void handleSigned(const char* p, const char* s) {
     if (policy != cfg.policy || grace != cfg.graceS || rel != cfg.releaseMs || egress != cfg.egress) {
       cfg.policy = policy; cfg.graceS = max<uint16_t>(grace, 10);
       cfg.releaseMs = constrain(rel, 1000, 60000); cfg.egress = egress; changed = true;
+    }
+    uint8_t blk = (d["blk"] | 0) ? 1 : 0;
+    if (blk != cfg.blocked) {
+      cfg.blocked = blk; changed = true;
+      if (blk) { cfg.armed = 1; pulseActive = false; offlineFree = false; applyRelay(); }
+      logEvent(blk ? "bloqueado" : "desbloqueado", "esp");
     }
     if (changed) { cfgSave(); LOGF("[cfg] atualizado pelo servidor: policy=%d grace=%u rel=%u egress=%d",
                                cfg.policy, cfg.graceS, cfg.releaseMs, cfg.egress); }
@@ -492,8 +504,8 @@ button,input{font:inherit;width:100%;border:0;border-radius:14px;padding:15px;ma
 <script>%SHA%
 const $=i=>document.getElementById(i);let PIN="";try{PIN=localStorage.getItem("vlpin")||""}catch(e){}
 async function act(a){try{const n=(await(await fetch("/l/nonce")).json()).n;const b=new URLSearchParams({a,n,m:hmac(PIN,"loc|"+n+"|"+a)});
-const r=await fetch("/l/cmd",{method:"POST",body:b});const d=await r.json();if(!r.ok){$("msg").textContent=d.e||"erro";if(r.status==401&&d.e=="pin"){PIN="";show(false)}return false}
-show(true);$("nm").textContent=d.name;$("st").textContent=d.free?"LIVRE (queda)":d.relay?"TRANCADO":(d.armed?"LIBERANDO":"DESTRANCADO");
+const r=await fetch("/l/cmd",{method:"POST",body:b});const d=await r.json();if(!r.ok){$("msg").textContent=d.e=="bloqueado"?"Porta BLOQUEADA no app: aberturas desativadas":(d.e||"erro");if(r.status==401&&d.e=="pin"){PIN="";show(false)}return false}
+show(true);$("nm").textContent=d.name;$("st").textContent=d.blk?"BLOQUEADO":d.free?"LIVRE (queda)":d.relay?"TRANCADO":(d.armed?"LIBERANDO":"DESTRANCADO");
 $("inf").textContent=(d.online?"Servidor online":"Servidor offline")+" · liberação "+d.rel/1000+"s";$("msg").textContent=a=="release"?"Liberado":"";
 if(a=="release")setTimeout(()=>act("status"),d.rel+400);return true}catch(e){$("msg").textContent="Sem resposta do dispositivo"}}
 function show(on){$("lg").className=on?"c h":"c";$("ap").className=on?"c":"c h"}
@@ -528,7 +540,7 @@ void handleNonce() {
 void localStatusJson(String& out) {
   JsonDocument d;
   d["name"] = cfg.name; d["armed"] = (bool)cfg.armed; d["relay"] = relayOn; d["free"] = offlineFree;
-  d["online"] = wsAuthed; d["rel"] = cfg.releaseMs;
+  d["online"] = wsAuthed; d["rel"] = cfg.releaseMs; d["blk"] = (bool)cfg.blocked;
   serializeJson(d, out);
 }
 

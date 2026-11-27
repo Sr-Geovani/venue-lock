@@ -188,7 +188,7 @@ const EV={
   srv_off:["Perdeu o servidor","○","bad"],queda_libera:["Liberou por queda de internet","⚠","warn"],queda_fim:["Internet voltou","●","ok"],
   ap_emerg:["Wi-Fi de emergência aberto","📶","warn"],boot:["Dispositivo ligou","⏻","mut"],registrado:["Cadastrado","＋","info"],
   config:["Ajustes alterados","⚙","mut"],config_local:["Ajustes feitos no dispositivo","⚙","mut"],token_api:["Token de integração trocado","🔑","warn"],
-  ota_enviado:["Atualização enviada","⇣","info"],ota_ok:["Firmware atualizado","✓","ok"],ota_falha:["Falha na atualização","!","bad"],
+  ota_enviado:["Atualização enviada","⇣","info"],ota_ok:["Firmware atualizado","✓","ok"],ota_falha:["Falha na atualização","!","bad"],bloqueado:["Bloqueada (aberturas recusadas)","🚫","bad"],desbloqueado:["Desbloqueada","✓","ok"],recusado_blq:["Abertura recusada: bloqueada","🚫","bad"],
   reboot:["Reinício solicitado","↻","mut"],portal:["Portal de configuração aberto","⚙","warn"],portal_login:["Login no portal do dispositivo","🔑","mut"],
   portal_bloq:["Portal bloqueado (senha errada)","!","bad"],pin_bloq:["Acesso local bloqueado (PIN errado)","!","bad"],wifi_config:["Wi-Fi alterado","📶","info"],created:["Cadastrado","＋","info"]};
 function evInfo(e){const b=EV[e.kind]||[e.kind,"•","mut"];let tone=b[2],detail=e.detail||"";
@@ -197,7 +197,7 @@ function evInfo(e){const b=EV[e.kind]||[e.kind,"•","mut"];let tone=b[2],detail
   detail=detail.replace(/^ok \[(.*)\]$/,"$1").replace(/code=1006/,"conexão caiu").replace(/code=1000/,"encerrada").replace(/^ip [^ ]+ /,"");
   if(e.kind==="config"){try{const o=JSON.parse(detail);detail=Object.keys(o).map(k=>({name:"nome",egress_ok:"saída livre",auto_update:"atualização automática",open_value:"valor que libera",policy:"queda",grace_s:"tempo de queda",release_ms:"tempo de liberação",policy_hold:"queda"}[k]||k)).join(", ")}catch(x){}}
   return{title:b[0],icon:b[1],tone,detail:[srcName(e.source),detail].filter(Boolean).join(" · ")}}
-function stateOf(d){if(!d.online)return["Offline","p-bad","d-bad"];if(d.free)return["Livre · queda","p-warn","d-warn"];if(d.relay)return["Trancado","p-ok","d-ok"];return d.armed?["Liberando","p-info","d-warn"]:["Destrancado","p-warn","d-warn"]}
+function stateOf(d){if(!d.online)return["Offline","p-bad","d-bad"];if(d.blocked)return["Bloqueado","p-bad","d-ok"];if(d.free)return["Livre · queda","p-warn","d-warn"];if(d.relay)return["Trancado","p-ok","d-ok"];return d.armed?["Liberando","p-info","d-warn"]:["Destrancado","p-warn","d-warn"]}
 function signal(r){if(!r)return"—";return r>-60?"Ótimo":r>-70?"Bom":r>-80?"Fraco":"Ruim"}
 
 /* ---------- ações ---------- */
@@ -207,12 +207,15 @@ async function cmd(d,a,btn){
   if(btn)btn.disabled=true;
   try{await api("POST",`/api/devices/${d.id}/cmd`,{a});toast(a==="release"?`Liberado por ${d.release_ms/1000} s`:a==="lock"?"Trancado":a==="unlock"?"Destrancado":"Comando enviado")}
   catch(e){toast(e.message)}finally{if(btn)btn.disabled=false}}
+async function setBlocked(d,on,btn){
+  if(!confirm(on?`Bloquear "${d.name}"? Ela tranca e recusa abrir pelo sistema, pelo app e pelo acesso local até você desbloquear. O botão físico de dentro continua funcionando.`:`Desbloquear "${d.name}"? Volta a aceitar aberturas do sistema e do app.`))return;
+  btn.disabled=true;try{const r=await api("PATCH","/api/devices/"+d.id,{blocked:on});toast((on?"Bloqueada":"Desbloqueada")+(r.delivered?"":" · aplica quando ela reconectar"))}catch(e){toast(e.message)}finally{btn.disabled=false}}
 async function bulk(a,btn){
   const n=[...DEV.values()].length;
-  const msg={lock:`Trancar TODAS as ${n} portas?`,unlock:`DESTRANCAR TODAS as ${n} portas? Elas ficam abertas até alguém trancar.`,release:`Liberar TODAS as ${n} portas agora?`}[a];
+  const msg={block:`BLOQUEAR TODAS as ${n} portas? Ficam trancadas e recusam abrir pelo sistema e pelo app até desbloquear.`,unblock:`Desbloquear TODAS as ${n} portas?`,lock:`Trancar TODAS as ${n} portas?`,unlock:`DESTRANCAR TODAS as ${n} portas? Elas ficam abertas até alguém trancar.`,release:`Liberar TODAS as ${n} portas agora?`}[a];
   if(!confirm(msg))return;btn.disabled=true;
   try{const r=await api("POST","/api/devices/bulk",{a});
-    let t=`${{lock:"Trancadas",unlock:"Destrancadas",release:"Liberadas"}[a]}: ${r.ok} de ${r.total}`;
+    let t=`${{lock:"Trancadas",unlock:"Destrancadas",release:"Liberadas",block:"Bloqueadas",unblock:"Desbloqueadas"}[a]}: ${r.ok} de ${r.total}`;
     if(r.offline.length)t+=` · offline: ${r.offline.join(", ")}`;if(r.failed.length)t+=` · falhou: ${r.failed.join(", ")}`;toast(t)}
   catch(e){toast(e.message)}finally{btn.disabled=false}}
 function localUrl(d){return`http://${d.host||d.uuid.replace(/_/g,"-")}.local/`}
@@ -246,10 +249,11 @@ function homeCard(d){const[s,pc]=stateOf(d);
       el("span",{},"Sinal ",el("b",{},signal(d.rssi))),
       el("span",{},d.online?"Online há ":"Visto há ",el("b",{},ago(d.online?d.online_since:d.last_seen))),
       el("span",{},"Liberação ",el("b",{},(d.release_ms/1000)+" s"))),
-    el("button",{class:"acc full big",disabled:!d.online,onclick:e=>cmd(d,"release",e.currentTarget)},"Liberar porta (",(d.release_ms/1000)+" s)"),
+    el("button",{class:"acc full big",disabled:!d.online||!!d.blocked,onclick:e=>cmd(d,"release",e.currentTarget)},d.blocked?"🚫 Bloqueada":"Liberar porta ("+(d.release_ms/1000)+" s)"),
     el("div",{class:"lockseg"},
       el("button",{class:d.armed?"on-lock":"",disabled:!d.online||!!d.armed,onclick:e=>cmd(d,"lock",e.currentTarget)},"🔒 Trancar"),
-      el("button",{class:d.armed?"":"on-unlock",disabled:!d.online||!d.armed,onclick:e=>cmd(d,"unlock",e.currentTarget)},"🔓 Destrancar")),
+      el("button",{class:d.armed?"":"on-unlock",disabled:!d.online||!d.armed||!!d.blocked,onclick:e=>cmd(d,"unlock",e.currentTarget)},"🔓 Destrancar")),
+    el("button",{class:"full "+(d.blocked?"bad":""),style:"margin-top:8px",onclick:e=>setBlocked(d,!d.blocked,e.currentTarget)},d.blocked?"🚫 Bloqueada · tocar para desbloquear":"Bloquear aberturas (loja fechada)"),
     el("div",{class:"actions",style:"grid-template-columns:1fr 1fr"},
       el("button",{onclick:()=>openDevice(d.id,"log")},"Registros"),
       el("button",{onclick:()=>openDevice(d.id,"ajustes")},"Ajustes")),
@@ -299,7 +303,8 @@ function render(){if(!ME)return;renderNav();
     $("#main").replaceChildren(
       el("div",{class:"stat"},el("div",{class:"card"},el("b",{},on),el("span",{},"online")),el("div",{class:"card"},el("b",{},list.length-on),el("span",{},"offline")),el("div",{class:"card"},el("b",{},free),el("span",{},"em queda"))),
       list.length>1?el("div",{class:"card",style:"margin-bottom:12px"},el("div",{class:"row between wrap"},el("div",{},el("b",{},"Todas as portas"),el("div",{class:"small mut"},"Comando geral para os dispositivos online")),
-        el("div",{class:"row"},el("button",{class:"acc",disabled:!on,onclick:e=>bulk("lock",e.currentTarget)},"🔒 Trancar todas"),el("button",{class:"bad",disabled:!on,onclick:e=>bulk("unlock",e.currentTarget)},"Destrancar todas")))):null,
+        el("div",{class:"row wrap"},el("button",{class:"acc",disabled:!on,onclick:e=>bulk("lock",e.currentTarget)},"🔒 Trancar todas"),el("button",{class:"bad",disabled:!on,onclick:e=>bulk("unlock",e.currentTarget)},"Destrancar todas"),
+          list.some(d=>!d.blocked)?el("button",{class:"bad",onclick:e=>bulk("block",e.currentTarget)},"🚫 Bloquear todas"):el("button",{onclick:e=>bulk("unblock",e.currentTarget)},"Desbloquear todas")))):null,
       list.length?el("div",{class:"grid"},list.map(homeCard)):el("div",{class:"card empty"},"Nenhum dispositivo ainda. Grave um ESP e ele aparece aqui sozinho."))}
   else if(TAB==="devs"){$("#hT").textContent="Dispositivos";$("#hS").textContent=`${on} de ${list.length} online`;
     $("#main").replaceChildren(

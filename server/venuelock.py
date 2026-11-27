@@ -38,7 +38,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.7.0"
+VERSION = "2.8.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -88,6 +88,7 @@ DEVICE_MIGRATIONS = [
     ("auto_update", "INTEGER NOT NULL DEFAULT 1"),
     ("ota_ver", "TEXT"),
     ("ota_at", "REAL"),
+    ("blocked", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -242,7 +243,7 @@ class Store:
     def update_device(self, did: int, **f: Any) -> None:
         allowed = {"name", "policy", "grace_s", "release_ms", "pin", "egress_ok", "armed",
                    "fw", "ip", "host", "rssi", "boot", "last_seen",
-                   "api_token", "open_value", "auto_update", "ota_ver", "ota_at"}
+                   "api_token", "open_value", "auto_update", "ota_ver", "ota_at", "blocked"}
         if set(f) - allowed:
             raise ValueError(f"campos inválidos: {set(f) - allowed}")
         if f:
@@ -283,7 +284,7 @@ class Hub:
     def view(self, d: dict) -> dict:
         v = {k: d[k] for k in ("id", "uuid", "name", "policy", "grace_s", "release_ms", "pin", "egress_ok",
                                "armed", "fw", "ip", "host", "rssi", "boot", "last_seen", "created_at",
-                               "api_token", "open_value", "auto_update")}
+                               "api_token", "open_value", "auto_update", "blocked")}
         v["owner"] = d.get("owner")
         v["host"] = host_slug(d["name"], d["uuid"])  # nome.local acompanha o nome do app
         c = self.conns.get(d["id"])
@@ -317,7 +318,7 @@ FWDIR = web.AppKey("fwdir", str)
 
 def cfg_payload(d: dict) -> dict:
     return {"k": "cfg", "name": d["name"], "policy": d["policy"], "grace": d["grace_s"],
-            "rel": d["release_ms"], "pin": d["pin"], "egress": d["egress_ok"]}
+            "rel": d["release_ms"], "pin": d["pin"], "egress": d["egress_ok"], "blk": d["blocked"]}
 
 
 # ----------------------------------------------------------------------------- auth
@@ -464,6 +465,8 @@ async def h_device_patch(request: web.Request) -> web.Response:
         f["egress_ok"] = 1 if b["egress_ok"] else 0
     if "auto_update" in b:
         f["auto_update"] = 1 if b["auto_update"] else 0
+    if "blocked" in b:
+        f["blocked"] = 1 if b["blocked"] else 0
     if "open_value" in b:
         if str(b["open_value"]) not in ("0", "1"):
             raise ValueError("open_value deve ser 0 ou 1")
@@ -494,7 +497,13 @@ async def h_device_patch(request: web.Request) -> web.Response:
         raise fail(web.HTTPConflict, "política 'manter trancado offline' exige saída livre por hardware confirmada")
     st, hub = request.app[STORE], request.app[HUB]
     st.update_device(d["id"], **f)
-    st.event(d["id"], "config", "painel", json.dumps({k: v for k, v in f.items() if k != "pin"}, ensure_ascii=False))
+    if "blocked" in f and f["blocked"] != d["blocked"]:
+        st.event(d["id"], "bloqueado" if f["blocked"] else "desbloqueado", "painel")
+        f_log = {k: v for k, v in f.items() if k not in ("pin", "blocked")}
+    else:
+        f_log = {k: v for k, v in f.items() if k != "pin"}
+    if f_log:
+        st.event(d["id"], "config", "painel", json.dumps(f_log, ensure_ascii=False))
     nd = st.device(d["id"])
     c = hub.conns.get(d["id"])
     if c:
@@ -521,6 +530,9 @@ async def send_cmd(app: web.Application, d: dict, a: str, source: str, detail: s
     st, hub = app[STORE], app[HUB]
     c = hub.conns.get(d["id"])
     suffix = f" [{detail}]" if detail else ""
+    if d.get("blocked") and a in ("release", "unlock"):
+        st.event(d["id"], a, source, "recusado: bloqueado" + suffix)
+        return "bloqueado"
     if c is None:
         st.event(d["id"], a, source, "recusado: offline" + suffix)
         return "offline"
@@ -552,6 +564,8 @@ async def h_cmd(request: web.Request) -> web.Response:
         raise fail(web.HTTPConflict, "dispositivo offline: use o acesso local (mesma rede Wi-Fi)")
     if err == "timeout":
         raise fail(web.HTTPGatewayTimeout, "dispositivo não confirmou o comando")
+    if err == "bloqueado":
+        raise fail(web.HTTPConflict, "porta bloqueada: desbloqueie para abrir")
     if err:
         raise fail(web.HTTPConflict, f"recusado pelo dispositivo: {err}")
     return web.json_response({"ok": True})
@@ -562,9 +576,24 @@ async def h_bulk(request: web.Request) -> web.Response:
     u = current_user(request)
     b = await body_json(request)
     a = b.get("a")
-    if a not in ("lock", "unlock", "release"):
-        raise ValueError("a deve ser lock, unlock ou release")
-    devs = request.app[STORE].devices_for(u)
+    if a not in ("lock", "unlock", "release", "block", "unblock"):
+        raise ValueError("a deve ser lock, unlock, release, block ou unblock")
+    st, hub = request.app[STORE], request.app[HUB]
+    devs = st.devices_for(u)
+    if a in ("block", "unblock"):
+        val = 1 if a == "block" else 0
+        for d in devs:
+            if d["blocked"] != val:
+                st.update_device(d["id"], blocked=val)
+                st.event(d["id"], "bloqueado" if val else "desbloqueado", f"app:{u['username']} (geral)")
+            c = hub.conns.get(d["id"])
+            if c:
+                await c.send_signed(cfg_payload(st.device(d["id"])))
+            await hub.push(st, d["id"])
+        online = [d["name"] for d in devs if d["id"] in hub.conns]
+        LOG.warning("comando geral %s por %s (%d portas)", a, u["username"], len(devs))
+        return web.json_response({"ok": len(devs), "total": len(devs),
+                                  "offline": [d["name"] for d in devs if d["name"] not in online], "failed": []})
     results = await asyncio.gather(*(send_cmd(request.app, d, a, f"app:{u['username']} (geral)") for d in devs))
     out = [{"id": d["id"], "name": d["name"], "error": e} for d, e in zip(devs, results)]
     ok = sum(1 for r in out if not r["error"])
@@ -610,6 +639,8 @@ async def h_blynk_update(request: web.Request) -> web.Response:
     err = await send_cmd(request.app, d, "release", "sistema", raw)
     if err == "offline":
         return blynk_err("Device is offline.")
+    if err == "bloqueado":
+        return blynk_err("Device is blocked.")
     if err:
         return blynk_err(f"Device error: {err}")
     return web.Response(text="")
