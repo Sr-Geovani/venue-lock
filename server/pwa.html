@@ -296,13 +296,14 @@ function fwCard(){const info=el("div",{class:"small mut"},el("span",{class:"spin
     try{const r=await fetch("/api/firmware",{method:"POST",headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/octet-stream"},body:f});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("Erro "+r.status));toast(`v${d.version} publicado · enviado para ${d.sent} ESP(s)`);render()}catch(e){toast(e.message)}finally{b.disabled=false}}},"Publicar .bin manualmente");
   return el("div",{class:"card"},el("b",{},"Firmware dos ESPs"),info,el("p",{class:"small mut"},"Normalmente a VPS compila e publica sozinha (git pull + install.sh). Use abaixo só para enviar um .bin do Arduino IDE."),inp,b)}
 
+const _rc=Element.prototype.replaceChildren;Element.prototype.replaceChildren=function(...k){return _rc.apply(this,k.flat().filter(x=>x!=null&&x!==false))};
 function render(){if(!ME)return;renderNav();
   const list=[...DEV.values()].sort((a,b)=>a.name.localeCompare(b.name,"pt-BR"));const on=list.filter(d=>d.online).length;
   if(TAB==="home"){$("#hT").textContent="Início";$("#hS").textContent=`${on} de ${list.length} online`;
     const free=list.filter(d=>d.online&&d.free).length;
     $("#main").replaceChildren(
       el("div",{class:"stat"},el("div",{class:"card"},el("b",{},on),el("span",{},"online")),el("div",{class:"card"},el("b",{},list.length-on),el("span",{},"offline")),el("div",{class:"card"},el("b",{},free),el("span",{},"em queda"))),
-      list.length>1?el("div",{class:"card",style:"margin-bottom:12px"},el("div",{class:"row between wrap"},el("div",{},el("b",{},"Todas as portas"),el("div",{class:"small mut"},"Comando geral para os dispositivos online")),
+      list.length?el("div",{class:"card",style:"margin-bottom:12px"},el("div",{class:"row between wrap"},el("div",{},el("b",{},list.length>1?"Todas as portas":"Comando geral"),el("div",{class:"small mut"},"Vale para todas as portas online da conta")),
         el("div",{class:"row wrap"},el("button",{class:"acc",disabled:!on,onclick:e=>bulk("lock",e.currentTarget)},"🔒 Trancar todas"),el("button",{class:"bad",disabled:!on,onclick:e=>bulk("unlock",e.currentTarget)},"Destrancar todas"),
           list.some(d=>!d.blocked)?el("button",{class:"bad",onclick:e=>bulk("block",e.currentTarget)},"🚫 Bloquear todas"):el("button",{onclick:e=>bulk("unblock",e.currentTarget)},"Desbloquear todas")))):null,
       list.length?el("div",{class:"grid"},list.map(homeCard)):el("div",{class:"card empty"},"Nenhum dispositivo ainda. Grave um ESP e ele aparece aqui sozinho."))}
