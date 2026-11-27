@@ -162,7 +162,10 @@ const DEV=new Map();
 
 /* ---------- helpers ---------- */
 function el(t,a={},...k){const n=document.createElement(t);for(const[x,v]of Object.entries(a)){if(x.startsWith("on"))n.addEventListener(x.slice(2),v);else if(x==="class")n.className=v;else if(x==="html")n.innerHTML=v;else if(v!==false&&v!=null)n.setAttribute(x,v===true?"":v)}for(const c of k.flat())if(c!=null&&c!==false)n.append(c);return n}
-function toast(m){const t=$("#toast");t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",3800)}
+function toast(m){const t=$("#toast"),sh=$("#sheet");
+  /* janela aberta fica numa camada acima de tudo: o aviso precisa ir para dentro dela */
+  const host=sh&&sh.open?sh:document.body;if(t.parentNode!==host)host.appendChild(t);
+  t.textContent=m;t.style.display="block";clearTimeout(t.h);t.h=setTimeout(()=>t.style.display="none",3800)}
 const pad=n=>String(n).padStart(2,"0");
 function hm(ts){const d=new Date(ts*1000);return pad(d.getHours())+":"+pad(d.getMinutes())}
 function hms(ts){const d=new Date(ts*1000);return hm(ts)+":"+pad(d.getSeconds())}
@@ -359,6 +362,7 @@ function settingsView(d){
     el("label",{class:"f"},"PIN local (8 a 16 letras/números · também é a senha do Wi-Fi de emergência)"),el("input",{name:"pin",value:d.pin,autocomplete:"off"}),
     el("label",{class:"check"},el("input",{name:"auto_update",type:"checkbox",checked:!!d.auto_update}),"Atualizar firmware automaticamente"),
     el("button",{class:"acc full big",style:"margin-top:16px"},"Salvar ajustes"),
+    el("div",{class:"small",id:"saveMsg",style:"margin-top:8px;min-height:18px;text-align:center"}),
     el("div",{class:"section-title"},"Manutenção"),
     el("div",{class:"actions"},
       el("button",{type:"button",disabled:!d.online,onclick:e=>cmd(d,"reboot",e.currentTarget)},"Reiniciar"),
@@ -366,10 +370,15 @@ function settingsView(d){
       el("button",{type:"button",onclick:()=>window.open(ipUrl(d)||localUrl(d),"_blank")},"Acesso local")),
     el("div",{class:"small mut",style:"margin-top:10px"},`Firmware ${d.fw||"?"} · IP ${d.ip||"—"} · sinal ${d.rssi?d.rssi+" dBm":"—"}`),
     el("button",{type:"button",class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm(`Remover "${d.name}" do painel? Ele volta a aparecer se reconectar.`))return;try{await api("DELETE","/api/devices/"+d.id);closeSheet()}catch(e){toast(e.message)}}},"Remover dispositivo"));
-  f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);
+  f.addEventListener("invalid",e=>{const m=$("#saveMsg");if(m){m.style.color="var(--bad)";m.textContent="Confira o campo "+({name:"Nome",release_s:"Tempo de liberação (1 a 60 s)",grace_s:"Tempo sem servidor (mínimo 10 s)",pin:"PIN (8 a 16 letras/números)"}[e.target.name]||e.target.name)}},true);
+  f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const sm=$("#saveMsg"),btn=f.querySelector("button.acc.big");
+    sm.style.color="var(--mut)";sm.textContent="Salvando…";btn.disabled=true;
     const b={name:F.get("name"),release_ms:Math.round(+F.get("release_s")*1000),policy:F.get("policy"),grace_s:+F.get("grace_s"),egress_ok:F.get("egress_ok")==="on",pin:F.get("pin"),auto_update:F.get("auto_update")==="on"};
-    try{const r=await api("PATCH","/api/devices/"+d.id,b);toast(r.delivered?"Salvo e enviado ao dispositivo":"Salvo · aplica quando ele reconectar")}
-    catch(err){toast(err instanceof TypeError?"Sem internet: os ajustes só salvam com conexão. No local, use o portal do dispositivo (botão 4 s · Configurações avançadas).":err.message)}};
+    try{const r=await api("PATCH","/api/devices/"+d.id,b);const ok=r.delivered?"✓ Salvo e enviado ao dispositivo":"✓ Salvo · aplica quando ele reconectar";
+      sm.style.color="var(--ok)";sm.textContent=ok+" ("+hm(Date.now()/1000)+")";toast(ok)}
+    catch(err){const m=err instanceof TypeError?"Sem internet: os ajustes só salvam com conexão. No local, use o portal do dispositivo (botão 4 s · Configurações avançadas).":err.message;
+      sm.style.color="var(--bad)";sm.textContent="✗ "+m;toast(m)}
+    finally{btn.disabled=false}};
   return f}
 
 function integrationView(d){
