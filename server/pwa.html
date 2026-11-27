@@ -296,11 +296,24 @@ function acct(){
   out.push(el("button",{class:"bad full big",style:"margin-top:18px",onclick:logout},"Sair da conta"));
   return out}
 
-function fwCard(){const info=el("div",{class:"small mut"},el("span",{class:"spin"})),inp=el("input",{type:"file",accept:".bin",style:"margin-top:10px"});
-  api("GET","/api/firmware").then(r=>{const p=r.firmware.find(x=>x.published);info.textContent=p?`Publicado: v${p.version} · ${Math.round(p.size/1024)} KB · ${new Date(p.created_at*1000).toLocaleString("pt-BR")}`:"Nenhum firmware publicado"}).catch(e=>info.textContent=e.message);
+function vt(v){return String(v).split(".").map(x=>parseInt(x)||0).reduce((a,n)=>a*1000+n,0)}
+async function fwPublish(v,stage,label){if(!confirm(label))return;
+  try{const r=await api("POST",`/api/firmware/${encodeURIComponent(v)}/publish`,{stage});toast(`v${r.version} ${r.rollback?"(volta de versão) ":""}publicada para ${r.stage==="teste"?"dispositivos de teste":"todos"} · enviada a ${r.sent} ESP(s)`);render()}catch(e){toast(e.message)}}
+function fwCard(){const info=el("div",{},el("span",{class:"spin"})),inp=el("input",{type:"file",accept:".bin",style:"margin-top:10px"});
+  api("GET","/api/firmware").then(r=>{const cur=r.firmware.find(x=>x.published);
+    info.replaceChildren(...(r.firmware.length?r.firmware.slice(0,6).map(f=>el("div",{class:"ev"},
+      el("div",{class:"ic "+(f.published?(f.stage==="teste"?"warn":"ok"):"mut")},f.published?(f.stage==="teste"?"β":"✓"):"·"),
+      el("div",{class:"grow",style:"min-width:0"},el("div",{class:"t"},"v"+f.version+(f.published?(f.stage==="teste"?" · em teste":" · publicada para todos"):"")+(f.published&&f.rollback?" · volta de versão":"")),
+        el("div",{class:"d"},`${Math.round(f.size/1024)} KB · ${new Date(f.created_at*1000).toLocaleString("pt-BR")}`),
+        el("div",{class:"row wrap",style:"margin-top:6px"},
+          f.published&&f.stage==="teste"?el("button",{class:"acc",onclick:()=>fwPublish(f.version,"todos",`Liberar v${f.version} para TODOS os dispositivos?`)},"Liberar para todos"):null,
+          !f.published?el("button",{onclick:()=>fwPublish(f.version,"todos",`Publicar v${f.version} para TODOS?${cur&&f.version!==cur.version?" Os dispositivos voltam/vão para esta versão.":""}`)},cur&&vt(f.version)>vt(cur.version)?"Publicar esta versão":"Voltar para esta versão"):null)))):
+      [el("div",{class:"small mut"},"Nenhum firmware publicado")]))}).catch(e=>info.textContent=e.message);
   const b=el("button",{class:"acc full",style:"margin-top:10px",onclick:async()=>{const f=inp.files[0];if(!f)return toast("Escolha o arquivo .bin");if(!confirm(`Publicar ${f.name}? Os ESPs com atualização automática vão instalar.`))return;b.disabled=true;
     try{const r=await fetch("/api/firmware",{method:"POST",headers:{"Authorization":"Bearer "+TOK,"Content-Type":"application/octet-stream"},body:f});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("Erro "+r.status));toast(`v${d.version} publicado · enviado para ${d.sent} ESP(s)`);render()}catch(e){toast(e.message)}finally{b.disabled=false}}},"Publicar .bin manualmente");
-  return el("div",{class:"card"},el("b",{},"Firmware dos ESPs"),info,el("p",{class:"small mut"},"Normalmente a VPS compila e publica sozinha (git pull + install.sh). Use abaixo só para enviar um .bin do Arduino IDE."),inp,b)}
+  return el("div",{class:"card"},el("b",{},"Firmware dos ESPs"),
+    el("p",{class:"small mut"},"Marque um dispositivo como 'de teste' (Ajustes): cada versão nova vai primeiro só para ele. Confira e toque em 'Liberar para todos'. Se der problema, 'Voltar para esta versão' numa versão anterior."),
+    info,el("p",{class:"small mut",style:"margin-top:14px"},"Envio manual de .bin do Arduino IDE (normalmente a VPS compila sozinha):"),inp,b)}
 
 const _rc=Element.prototype.replaceChildren;Element.prototype.replaceChildren=function(...k){return _rc.apply(this,k.flat().filter(x=>x!=null&&x!==false))};
 function render(){if(!ME)return;renderNav();
@@ -361,6 +374,7 @@ function settingsView(d){
     el("div",{class:"section-title"},"Acesso local e atualização"),
     el("label",{class:"f"},"PIN local (8 a 16 letras/números · também é a senha do Wi-Fi de emergência)"),el("input",{name:"pin",value:d.pin,autocomplete:"off"}),
     el("label",{class:"check"},el("input",{name:"auto_update",type:"checkbox",checked:!!d.auto_update}),"Atualizar firmware automaticamente"),
+    el("label",{class:"check"},el("input",{name:"beta",type:"checkbox",checked:!!d.beta}),el("span",{},"Dispositivo de teste ",el("span",{class:"mut"},"(recebe versões novas antes dos outros)"))),
     el("button",{class:"acc full big",style:"margin-top:16px"},"Salvar ajustes"),
     el("div",{class:"small",id:"saveMsg",style:"margin-top:8px;min-height:18px;text-align:center"}),
     el("div",{class:"section-title"},"Manutenção"),
@@ -375,7 +389,7 @@ function settingsView(d){
   f.addEventListener("invalid",e=>{const m=$("#saveMsg");if(m){m.style.color="var(--bad)";m.textContent="Confira o campo "+({name:"Nome",release_s:"Tempo de liberação (1 a 60 s)",grace_s:"Tempo sem servidor (mínimo 10 s)",pin:"PIN (8 a 16 letras/números)"}[e.target.name]||e.target.name)}},true);
   f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const sm=$("#saveMsg"),btn=f.querySelector("button.acc.big");
     sm.style.color="var(--mut)";sm.textContent="Salvando…";btn.disabled=true;
-    const b={name:F.get("name"),release_ms:Math.round(+F.get("release_s")*1000),policy:F.get("policy"),grace_s:+F.get("grace_s"),egress_ok:F.get("egress_ok")==="on",pin:F.get("pin"),auto_update:F.get("auto_update")==="on"};
+    const b={name:F.get("name"),release_ms:Math.round(+F.get("release_s")*1000),policy:F.get("policy"),grace_s:+F.get("grace_s"),egress_ok:F.get("egress_ok")==="on",pin:F.get("pin"),auto_update:F.get("auto_update")==="on",beta:F.get("beta")==="on"};
     try{const r=await api("PATCH","/api/devices/"+d.id,b);const ok=r.delivered?"✓ Salvo e enviado ao dispositivo":"✓ Salvo · aplica quando ele reconectar";
       sm.style.color="var(--ok)";sm.textContent=ok+" ("+hm(Date.now()/1000)+")";toast(ok)}
     catch(err){const m=err instanceof TypeError?"Sem internet: os ajustes só salvam com conexão. No local, use o portal do dispositivo (botão 4 s · Configurações avançadas).":err.message;

@@ -32,6 +32,12 @@ if [[ $VER == "$PUB" && $FORCE != "--force" ]]; then
   log "firmware $VER já está publicado. Nada a fazer (use --force para recompilar)."
   exit 0
 fi
+if [[ $FORCE != "--force" ]] && docker exec venuelock python venuelock.py --db /data/venuelock.db fw-known "$VER" >/dev/null 2>&1; then
+  # Versão já compilada antes: não republica sozinho (respeita uma volta de versão feita no app)
+  log "firmware $VER já foi compilado antes e a publicada agora é ${PUB:-nenhuma}. Nada a fazer."
+  log "Para usar a $VER de novo: app -> Conta -> Firmware -> 'Voltar para esta versão'."
+  exit 0
+fi
 
 # ----------------------------------------------------------------- senha do portal
 if [[ ! -f $CONF ]]; then

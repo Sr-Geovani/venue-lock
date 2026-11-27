@@ -38,7 +38,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.9.0"
+VERSION = "2.10.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -93,6 +93,11 @@ DEVICE_MIGRATIONS = [
     ("heap_min", "INTEGER"),
     ("maxblk", "INTEGER"),
     ("uptime", "INTEGER"),
+    ("beta", "INTEGER NOT NULL DEFAULT 0"),
+]
+FIRMWARE_MIGRATIONS = [
+    ("stage", "TEXT NOT NULL DEFAULT 'todos'"),   # 'teste' = só dispositivos de teste recebem
+    ("rollback", "INTEGER NOT NULL DEFAULT 0"),   # 1 = volta de versão autorizada (permite versão menor)
 ]
 
 
@@ -177,6 +182,11 @@ class Store:
             if col not in cols:
                 self.x(f"ALTER TABLE devices ADD COLUMN {col} {ddl}")
                 LOG.info("banco migrado: devices.%s", col)
+        fcols = {r["name"] for r in self.q("PRAGMA table_info(firmware)")}
+        for col, ddl in FIRMWARE_MIGRATIONS:
+            if col not in fcols:
+                self.x(f"ALTER TABLE firmware ADD COLUMN {col} {ddl}")
+                LOG.info("banco migrado: firmware.%s", col)
         for r in self.q("SELECT id FROM devices WHERE api_token IS NULL"):
             self.x("UPDATE devices SET api_token=? WHERE id=?", (new_api_token(), r["id"]))
         self.x("CREATE UNIQUE INDEX IF NOT EXISTS ix_api_token ON devices(api_token)")
@@ -248,7 +258,7 @@ class Store:
         allowed = {"name", "policy", "grace_s", "release_ms", "pin", "egress_ok", "armed",
                    "fw", "ip", "host", "rssi", "boot", "last_seen",
                    "api_token", "open_value", "auto_update", "ota_ver", "ota_at", "blocked",
-                   "heap", "heap_min", "maxblk", "uptime"}
+                   "heap", "heap_min", "maxblk", "uptime", "beta"}
         if set(f) - allowed:
             raise ValueError(f"campos inválidos: {set(f) - allowed}")
         if f:
@@ -290,7 +300,7 @@ class Hub:
         v = {k: d[k] for k in ("id", "uuid", "name", "policy", "grace_s", "release_ms", "pin", "egress_ok",
                                "armed", "fw", "ip", "host", "rssi", "boot", "last_seen", "created_at",
                                "api_token", "open_value", "auto_update", "blocked",
-                               "heap", "heap_min", "maxblk", "uptime")}
+                               "heap", "heap_min", "maxblk", "uptime", "beta")}
         v["owner"] = d.get("owner")
         v["host"] = host_slug(d["name"], d["uuid"])  # nome.local acompanha o nome do app
         c = self.conns.get(d["id"])
@@ -471,6 +481,8 @@ async def h_device_patch(request: web.Request) -> web.Response:
         f["egress_ok"] = 1 if b["egress_ok"] else 0
     if "auto_update" in b:
         f["auto_update"] = 1 if b["auto_update"] else 0
+    if "beta" in b:
+        f["beta"] = 1 if b["beta"] else 0
     if "blocked" in b:
         f["blocked"] = 1 if b["blocked"] else 0
     if "open_value" in b:
@@ -695,8 +707,10 @@ async def maybe_ota(app: web.Application, d: dict, force: bool = False) -> str:
         return "nenhum firmware publicado"
     if d["fw"] == fw["version"]:
         return "já atualizado"
-    if ver_tuple(d["fw"]) > ver_tuple(fw["version"]):
+    if ver_tuple(d["fw"]) > ver_tuple(fw["version"]) and not fw["rollback"]:
         return f"dispositivo já tem versão mais nova ({d['fw']})"
+    if fw["stage"] == "teste" and not d["beta"] and not force:
+        return "versão em teste: aguardando 'Liberar para todos'"
     if not force:
         if not d["auto_update"]:
             return "atualização automática desligada"
@@ -715,10 +729,42 @@ async def h_fw_list(request: web.Request) -> web.Response:
     if not u["is_admin"]:
         raise fail(web.HTTPForbidden, "apenas administradores")
     return web.json_response({"firmware": request.app[STORE].q(
-        "SELECT version, md5, size, created_at, published FROM firmware ORDER BY created_at DESC LIMIT 20")})
+        "SELECT version, md5, size, created_at, published, stage, rollback FROM firmware ORDER BY created_at DESC LIMIT 20")})
 
 
-def store_firmware(st: Store, fwdir: str, data: bytes) -> tuple[str, str]:
+async def push_ota_all(app: web.Application) -> int:
+    sent = 0
+    for did in list(app[HUB].conns):
+        d = app[STORE].device(did)
+        if d and await maybe_ota(app, d) == "":
+            sent += 1
+    return sent
+
+
+async def h_fw_publish(request: web.Request) -> web.Response:
+    """Promove a versão em teste para todos, ou volta para uma versão anterior (rollback)."""
+    u = current_user(request)
+    if not u["is_admin"]:
+        raise fail(web.HTTPForbidden, "apenas administradores")
+    ver = request.match_info["ver"]
+    st = request.app[STORE]
+    fw = st.one("SELECT * FROM firmware WHERE version=?", (ver,))
+    if fw is None or not os.path.isfile(os.path.join(request.app[FWDIR], f"{ver}.bin")):
+        raise fail(web.HTTPNotFound, "versão não encontrada")
+    b = await body_json(request)
+    stage = b.get("stage", "todos")
+    if stage not in ("teste", "todos"):
+        raise ValueError("stage deve ser teste ou todos")
+    cur = published_fw(st)
+    rollback = 1 if cur and ver_tuple(ver) < ver_tuple(cur["version"]) else 0
+    st.x("UPDATE firmware SET stage=?, rollback=? WHERE version=?", (stage, rollback, ver))
+    st.x("UPDATE firmware SET published=(version=?)", (ver,))
+    LOG.warning("firmware %s publicado (%s%s) por %s", ver, stage, ", VOLTA DE VERSÃO" if rollback else "", u["username"])
+    sent = await push_ota_all(request.app)
+    return web.json_response({"version": ver, "stage": stage, "rollback": bool(rollback), "sent": sent})
+
+
+def store_firmware(st: Store, fwdir: str, data: bytes, stage: str | None = None) -> tuple[str, str]:
     """Valida, grava e publica um .bin do VENUE Lock. Retorna (versão, md5)."""
     if not 1024 < len(data) <= MAX_FW_BYTES or data[0] != 0xE9:
         raise ValueError("arquivo não é um firmware ESP8266 (.bin) válido")
@@ -736,6 +782,10 @@ def store_firmware(st: Store, fwdir: str, data: bytes) -> tuple[str, str]:
     st.x("INSERT INTO firmware(version,md5,size,created_at,published) VALUES(?,?,?,?,0) "
          "ON CONFLICT(version) DO UPDATE SET md5=excluded.md5, size=excluded.size, created_at=excluded.created_at",
          (ver, md5, len(data), time.time()))
+    if stage not in ("teste", "todos"):
+        # Com algum dispositivo de teste marcado, a versão nova vai primeiro só para ele
+        stage = "teste" if st.one("SELECT id FROM devices WHERE beta=1 LIMIT 1") else "todos"
+    st.x("UPDATE firmware SET stage=?, rollback=0 WHERE version=?", (stage, ver))
     st.x("UPDATE firmware SET published=(version=?)", (ver,))
     return ver, md5
 
@@ -1117,6 +1167,7 @@ def build_app(store: Store, fwdir: str) -> web.Application:
     r.add_post(r"/api/devices/{id:\d+}/ota", h_device_ota)
     r.add_get("/api/firmware", h_fw_list)
     r.add_post("/api/firmware", h_fw_upload)
+    r.add_post("/api/firmware/{ver}/publish", h_fw_publish)
     r.add_get("/fw/{ver}.bin", h_fw_file)
     for path, handler in (("update", h_blynk_update), ("get", h_blynk_get), ("isHardwareConnected", h_blynk_connected)):
         r.add_route("GET", f"/external/api/{path}", handler)
@@ -1184,8 +1235,25 @@ def cmd_publish_fw(a: argparse.Namespace) -> int:
         ver, md5 = store_firmware(st, os.path.join(os.path.dirname(os.path.abspath(a.db)), "fw"), data)
     finally:
         st.close()
-    print(f"firmware {ver} publicado ({len(data)} bytes, md5 {md5}); os ESPs online atualizam em até 1 minuto")
+    st = Store(a.db)
+    try:
+        stage = st.one("SELECT stage FROM firmware WHERE version=?", (ver,))["stage"]
+    finally:
+        st.close()
+    if stage == "teste":
+        print(f"firmware {ver} publicado EM TESTE ({len(data)} bytes, md5 {md5}): só os dispositivos de teste "
+              f"atualizam agora. Confira e depois toque em 'Liberar para todos' (app -> Conta -> Firmware).")
+    else:
+        print(f"firmware {ver} publicado ({len(data)} bytes, md5 {md5}); os ESPs online atualizam em até 1 minuto")
     return 0
+
+
+def cmd_fw_known(a: argparse.Namespace) -> int:
+    st = Store(a.db)
+    try:
+        return 0 if st.one("SELECT version FROM firmware WHERE version=?", (a.ver,)) else 1
+    finally:
+        st.close()
 
 
 def cmd_fw_version(a: argparse.Namespace) -> int:
@@ -1238,6 +1306,9 @@ def main(argv: list[str] | None = None) -> int:
     pf.add_argument("path")
     pf.set_defaults(fn=cmd_publish_fw)
     sub.add_parser("fw-version", help="versão de firmware publicada").set_defaults(fn=cmd_fw_version)
+    fk = sub.add_parser("fw-known", help="sai com 0 se a versão já foi compilada/publicada antes")
+    fk.add_argument("ver")
+    fk.set_defaults(fn=cmd_fw_known)
     a = p.parse_args(argv)
     setup_logging(a.verbose, a.log_json)
     try:
