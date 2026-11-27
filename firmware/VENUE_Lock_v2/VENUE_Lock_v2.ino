@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.5"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.6"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -113,6 +113,12 @@ bool portalMode = false;
 uint32_t portalActivity = 0;
 bool apFallback = false;
 uint32_t wifiDownSince = 0, apIdleSince = 0;
+// Com o AP de emergência aberto, a busca contínua pelo roteador troca de canal e derruba
+// quem tenta conectar no AP. Por isso a busca fica parada e só tenta de tempos em tempos,
+// e apenas quando ninguém está conectado no AP de emergência.
+static const uint32_t STA_RETRY_EVERY_MS = 45000, STA_TRY_FOR_MS = 12000;
+bool staTrying = false;
+uint32_t staTryStart = 0, staRetryAt = 0;
 bool mdnsUp = false;
 uint32_t restartAt = 0;
 enum WifiTest : uint8_t { T_IDLE, T_TEST, T_OK, T_FAIL };
@@ -948,6 +954,8 @@ void wifiTick() {
       if (mdnsUp) { MDNS.addService("http", "tcp", 80); LOGF("[wifi] %s  http://%s.local", WiFi.localIP().toString().c_str(), h.c_str()); }
     }
     if (apFallback) {
+      staTrying = false;
+      WiFi.setAutoReconnect(true);
       if (WiFi.softAPgetStationNum() > 0) apIdleSince = 0;
       else if (!apIdleSince) apIdleSince = now;
       else if (now - apIdleSince > AP_IDLE_CLOSE_MS) {
@@ -963,8 +971,23 @@ void wifiTick() {
       WiFi.mode(WIFI_AP_STA);
       WiFi.softAP(ap.c_str(), cfg.pin);
       apFallback = true; apIdleSince = 0;
+      WiFi.setAutoReconnect(false);
+      WiFi.disconnect(false);  // para a busca contínua: AP estável para o celular conectar
+      staTrying = false; staRetryAt = now + STA_RETRY_EVERY_MS;
       LOGF("[ap] roteador fora: AP de emergência %s em http://%s", ap.c_str(), WiFi.softAPIP().toString().c_str());
       logEvent("ap_emerg", "esp");
+    }
+    if (apFallback) {
+      if (staTrying) {
+        if (now - staTryStart > STA_TRY_FOR_MS) {  // roteador ainda fora: volta a deixar o AP quieto
+          WiFi.disconnect(false);
+          staTrying = false; staRetryAt = now + STA_RETRY_EVERY_MS;
+        }
+      } else if (WiFi.softAPgetStationNum() == 0 && (int32_t)(now - staRetryAt) >= 0) {
+        LOGF("[ap] tentando o roteador \"%s\" de novo", cfg.ssid);
+        WiFi.begin(cfg.ssid, cfg.pass);
+        staTrying = true; staTryStart = now;
+      }
     }
   }
 }
