@@ -67,6 +67,8 @@ for old, new in subs:
     if s.count(old) != 1:
         sys.exit("linha esperada não encontrada no firmware: " + old.split('"')[0])
     s = s.replace(old, new)
+# Versão para os clientes: sem mensagens no cabo USB (menor e com mais RAM livre)
+s = "#define SERIAL_DEBUG 0\n" + s
 open(sys.argv[2], "w", encoding="utf-8").write(s)
 PY
 
@@ -82,7 +84,8 @@ docker run --rm -v "$BUILD:/work" "$IMAGE" \
 BIN="$BUILD/out/VENUE_Lock_v2.ino.bin"
 [[ -f $BIN ]] || die "a compilação falhou (veja as mensagens acima)"
 SIZE=$(stat -c %s "$BIN")
-(( SIZE < 500000 )) || warn "firmware com $SIZE bytes: perto do limite de atualização remota (~500 KB)"
+log "Tamanho: $SIZE bytes (limite para atualizar pelo ar: ~508000)"
+(( SIZE < 490000 )) || warn "firmware com $SIZE bytes: pouca folga para atualização pelo ar (limite ~508 KB)"
 
 # ----------------------------------------------------------------- publica
 install -o 1000 -g 1000 -m 600 "$BIN" "$DIR/data/incoming.bin"

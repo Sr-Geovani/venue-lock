@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.9"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.5.0"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -47,7 +47,9 @@ static_assert(sizeof(VL_ACCOUNT_SECRET) - 1 >= 20,
 #define RELAY_GPIO      0
 #define BUTTON_GPIO     2        // botão para GND (INPUT_PULLUP). Não pressionar no boot.
 #define BUTTON_ENABLED  1
-#define SERIAL_DEBUG    1
+#ifndef SERIAL_DEBUG
+#define SERIAL_DEBUG    1   // a VPS compila com 0: firmware menor e mais memória livre (diagnóstico vai pelos Registros)
+#endif
 
 static const uint32_t CFG_MAGIC          = 0x564C4B33;  // "VLK3"
 static const uint32_t WIFI_AP_FALLBACK_MS= 60000;       // roteador fora > 60 s abre AP de emergência
@@ -62,7 +64,8 @@ static const uint32_t BTN_LONG_MS        = 4000;
 static const uint32_t BTN_DEBOUNCE_MS    = 40;
 
 #if SERIAL_DEBUG
-  #define LOGF(...) do { Serial.printf(__VA_ARGS__); Serial.println(); } while (0)
+  // PSTR: o texto das mensagens fica na flash, não ocupa RAM
+  #define LOGF(fmt, ...) do { Serial.printf_P(PSTR(fmt), ##__VA_ARGS__); Serial.println(); } while (0)
 #else
   #define LOGF(...) do {} while (0)
 #endif
