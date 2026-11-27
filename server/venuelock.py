@@ -38,7 +38,7 @@ except ImportError:
     sys.stderr.write("aiohttp não instalado: pip install 'aiohttp>=3.9'\n")
     sys.exit(2)
 
-VERSION = "2.8.0"
+VERSION = "2.9.0"
 LOG = logging.getLogger("venuelock")
 
 USER_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
@@ -89,6 +89,10 @@ DEVICE_MIGRATIONS = [
     ("ota_ver", "TEXT"),
     ("ota_at", "REAL"),
     ("blocked", "INTEGER NOT NULL DEFAULT 0"),
+    ("heap", "INTEGER"),
+    ("heap_min", "INTEGER"),
+    ("maxblk", "INTEGER"),
+    ("uptime", "INTEGER"),
 ]
 
 
@@ -243,7 +247,8 @@ class Store:
     def update_device(self, did: int, **f: Any) -> None:
         allowed = {"name", "policy", "grace_s", "release_ms", "pin", "egress_ok", "armed",
                    "fw", "ip", "host", "rssi", "boot", "last_seen",
-                   "api_token", "open_value", "auto_update", "ota_ver", "ota_at", "blocked"}
+                   "api_token", "open_value", "auto_update", "ota_ver", "ota_at", "blocked",
+                   "heap", "heap_min", "maxblk", "uptime"}
         if set(f) - allowed:
             raise ValueError(f"campos inválidos: {set(f) - allowed}")
         if f:
@@ -284,7 +289,8 @@ class Hub:
     def view(self, d: dict) -> dict:
         v = {k: d[k] for k in ("id", "uuid", "name", "policy", "grace_s", "release_ms", "pin", "egress_ok",
                                "armed", "fw", "ip", "host", "rssi", "boot", "last_seen", "created_at",
-                               "api_token", "open_value", "auto_update", "blocked")}
+                               "api_token", "open_value", "auto_update", "blocked",
+                               "heap", "heap_min", "maxblk", "uptime")}
         v["owner"] = d.get("owner")
         v["host"] = host_slug(d["name"], d["uuid"])  # nome.local acompanha o nome do app
         c = self.conns.get(d["id"])
@@ -882,7 +888,11 @@ async def handle_esp_msg(app: web.Application, c: DevConn, m: dict) -> None:
     elif t == "otaerr":
         st.event(c.did, "ota_falha", "esp", str(m.get("e", ""))[:120])
     elif t == "ping":
-        st.update_device(c.did, last_seen=time.time(), rssi=int(m.get("rssi", 0)))
+        f: dict[str, Any] = {"last_seen": time.time(), "rssi": int(m.get("rssi", 0))}
+        for key, col in (("heap", "heap"), ("heapmin", "heap_min"), ("maxblk", "maxblk"), ("up", "uptime")):
+            if isinstance(m.get(key), int):
+                f[col] = m[key]
+        st.update_device(c.did, **f)
 
 
 def apply_local_cfg(st: Store, did: int, lcfg: dict) -> dict:
@@ -957,6 +967,9 @@ async def ws_esp(request: web.Request) -> web.WebSocketResponse:
             st.event(did, "config", "esp:portal", json.dumps(applied, ensure_ascii=False))
             LOG.info("esp %s/%s: ajustes do portal local aplicados %s", user["username"], uuid, applied)
     st.close_outage(did)
+    if isinstance(hello.get("heap"), int):
+        st.update_device(did, heap=hello["heap"], heap_min=hello["heap"], uptime=0,
+                         maxblk=hello["maxblk"] if isinstance(hello.get("maxblk"), int) else None)
     otafree = hello.get("otafree")
     ota_txt = f" ota {int(otafree) // 1024} KB livres" if isinstance(otafree, int) else ""
     st.event(did, "online", "esp", f"ip {ip} fw {hello.get('fw', '?')} heap {hello.get('heap', '?')}{ota_txt} boot={hello.get('boot', '')}")

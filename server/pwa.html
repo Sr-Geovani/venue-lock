@@ -369,6 +369,8 @@ function settingsView(d){
       el("button",{type:"button",disabled:!d.online,onclick:async()=>{try{await api("POST",`/api/devices/${d.id}/ota`);toast("Atualização enviada")}catch(e){toast(e.message)}}},"Atualizar fw"),
       el("button",{type:"button",onclick:()=>window.open(ipUrl(d)||localUrl(d),"_blank")},"Acesso local")),
     el("div",{class:"small mut",style:"margin-top:10px"},`Firmware ${d.fw||"?"} · IP ${d.ip||"—"} · sinal ${d.rssi?d.rssi+" dBm":"—"}`),
+    d.heap?el("div",{class:"small",style:"margin-top:4px;color:"+((d.heap_min||d.heap)<6000?"var(--bad)":(d.heap_min||d.heap)<8000?"var(--warn)":"var(--mut)")},
+      `Memória livre ${(d.heap/1024).toFixed(1)} KB · menor desde que ligou ${((d.heap_min||d.heap)/1024).toFixed(1)} KB`+(d.maxblk?` · maior bloco ${(d.maxblk/1024).toFixed(1)} KB`:"")+(d.uptime?` · ligado há ${dur(d.uptime)}`:"")):null,
     el("button",{type:"button",class:"bad full",style:"margin-top:18px",onclick:async()=>{if(!confirm(`Remover "${d.name}" do painel? Ele volta a aparecer se reconectar.`))return;try{await api("DELETE","/api/devices/"+d.id);closeSheet()}catch(e){toast(e.message)}}},"Remover dispositivo"));
   f.addEventListener("invalid",e=>{const m=$("#saveMsg");if(m){m.style.color="var(--bad)";m.textContent="Confira o campo "+({name:"Nome",release_s:"Tempo de liberação (1 a 60 s)",grace_s:"Tempo sem servidor (mínimo 10 s)",pin:"PIN (8 a 16 letras/números)"}[e.target.name]||e.target.name)}},true);
   f.onsubmit=async e=>{e.preventDefault();const F=new FormData(f);const sm=$("#saveMsg"),btn=f.querySelector("button.acc.big");

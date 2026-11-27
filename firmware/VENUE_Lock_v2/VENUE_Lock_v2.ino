@@ -29,7 +29,7 @@ extern "C" {
 #include <user_interface.h>
 }
 
-#define FW_VERSION      "2.4.7"     // mude a cada nova versão antes de exportar o .bin
+#define FW_VERSION      "2.4.8"     // mude a cada nova versão antes de exportar o .bin
 
 // ============================ CONFIGURAÇÃO FIXA ==============================
 // Gravada no firmware: o instalador NÃO vê nem altera. No portal do ESP só
@@ -140,6 +140,7 @@ uint8_t relayTestAh = 1;
 char portalSession[33] = "";
 uint32_t portalSessionAt = 0, portalLockUntil = 0;
 uint8_t portalFails = 0;
+uint32_t heapMin = 0xFFFFFFFF, heapCheckAt = 0;
 bool otaPending = false;
 String otaPath, otaMd5, otaVer;
 
@@ -460,7 +461,7 @@ void wsEvent(WStype_t type, uint8_t* payload, size_t len) {
         h["fw"] = FW_VERSION; h["ip"] = WiFi.localIP().toString(); h["host"] = mdnsName();
         h["rssi"] = WiFi.RSSI(); h["armed"] = (bool)cfg.armed; h["relay"] = relayOn; h["free"] = offlineFree;
         h["boot"] = ESP.getResetInfo(); h["tag"] = FW_TAG;  // inclui exceção/endereço se travou
-        h["heap"] = ESP.getFreeHeap();
+        h["heap"] = ESP.getFreeHeap(); h["maxblk"] = ESP.getMaxFreeBlockSize();
         h["otafree"] = ESP.getFreeSketchSpace();  // espaço para a próxima atualização
         if (cfg.lcfgDirty) {
           JsonObject l = h["lcfg"].to<JsonObject>();
@@ -505,7 +506,7 @@ void wsStart() {
 }
 
 // ------------------------------------------------------------------ página local
-static const char LOCAL_HTML[] PROGMEM = R"HTML(<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+static const char LOCAL_HTML_A[] PROGMEM = R"HTML(<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="apple-mobile-web-app-capable" content="yes">
 <title>VENUE Local</title><style>body{margin:0;background:#0b0e13;color:#e9edf3;font:16px -apple-system,system-ui,sans-serif;padding:20px}
 .c{background:#151a22;border-radius:18px;padding:18px;margin:12px 0}h1{color:#4fd1b5;margin:6px 0}.m{color:#8b94a5;font-size:14px}
@@ -517,7 +518,10 @@ button,input{font:inherit;width:100%;border:0;border-radius:14px;padding:15px;ma
 <div class="c h" id="ap"><div class="m">Estado</div><div class="s" id="st">—</div><div class="m" id="inf"></div>
 <button class="a" onclick="act('release')">Liberar porta</button><button onclick="act('lock')">Trancar</button><button onclick="act('unlock')">Destrancar</button>
 <button onclick="localStorage.removeItem('vlpin');location.reload()">Sair</button></div><div class="m" id="msg"></div>
-<script>%SHA%
+<script>)HTML";
+
+// (o SHA_JS é enviado entre as duas partes: a página vai em pedaços direto da flash)
+static const char LOCAL_HTML_B[] PROGMEM = R"HTML(
 const $=i=>document.getElementById(i);let PIN="";try{PIN=localStorage.getItem("vlpin")||""}catch(e){}
 let BUSY=false;
 async function act(a,retry){if(BUSY&&!retry)return false;BUSY=true;document.querySelectorAll("#ap button").forEach(b=>b.disabled=true);$("msg").textContent="Enviando…";
@@ -543,13 +547,15 @@ void sendNoCache() { web.sendHeader(F("Cache-Control"), F("no-store")); }
 
 void markLocalActive();
 
+// Envia a página direto da flash em 3 pedaços: sem montar ~10 KB na RAM
 void handleLocalPage() {
   markLocalActive();
-  String page = FPSTR(LOCAL_HTML);
-  String sha = FPSTR(SHA_JS);
-  page.replace("%SHA%", sha);
+  web.setContentLength(strlen_P(LOCAL_HTML_A) + strlen_P(SHA_JS) + strlen_P(LOCAL_HTML_B));
   sendNoCache();
-  web.send(200, F("text/html"), page);
+  web.send(200, F("text/html"), "");
+  web.sendContent_P(LOCAL_HTML_A);
+  web.sendContent_P(SHA_JS);
+  web.sendContent_P(LOCAL_HTML_B);
 }
 
 void markLocalActive() { localActiveUntil = (millis() + 120000) | 1; }
@@ -1156,6 +1162,11 @@ void setup() {
 
 void loop() {
   uint32_t now = millis();
+  if (now - heapCheckAt >= 1000) {  // menor memória livre desde o boot (telemetria)
+    heapCheckAt = now;
+    uint32_t h = ESP.getFreeHeap();
+    if (h < heapMin) heapMin = h;
+  }
   web.handleClient();
   buttonTick();
 
@@ -1198,6 +1209,7 @@ void loop() {
   if (wsAuthed && now - lastPingMs >= PING_MS) {
     lastPingMs = now;
     JsonDocument d; d["t"] = "ping"; d["rssi"] = WiFi.RSSI(); d["heap"] = ESP.getFreeHeap();
+    d["heapmin"] = heapMin; d["maxblk"] = ESP.getMaxFreeBlockSize(); d["up"] = millis() / 1000;
     sendJson(d);
   }
 }
